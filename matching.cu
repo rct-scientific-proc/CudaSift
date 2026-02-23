@@ -1109,61 +1109,13 @@ double MatchSiftData(SiftData &data1, SiftData &data2)
   
 // Original version with correlation and maximization in two different kernels
 // Global memory reguirement: O(N^2)
-#if 0
-  float *d_corrData; 
-  int corrWidth = iDivUp(numPts2, 16)*16;
-  int corrSize = sizeof(float)*numPts1*corrWidth;
-  safeCall(cudaMalloc((void **)&d_corrData, corrSize));
-#if 0 // K40c 10.9ms, 1080 Ti 3.8ms
-  dim3 blocks1(numPts1, iDivUp(numPts2, 16));
-  dim3 threads1(16, 16); // each block: 1 points x 16 points
-  MatchSiftPoints<<<blocks1, threads1>>>(sift1, sift2, d_corrData, numPts1, numPts2);
-#else // K40c 7.6ms, 1080 Ti 1.4ms
-  dim3 blocks(iDivUp(numPts1,16), iDivUp(numPts2, 16));
-  dim3 threads(16, 16); // each block: 16 points x 16 points
-  MatchSiftPoints2<<<blocks, threads>>>(sift1, sift2, d_corrData, numPts1, numPts2);
-#endif
-  safeCall(cudaDeviceSynchronize());
-  dim3 blocksMax(iDivUp(numPts1, 16));
-  dim3 threadsMax(16, 16);
-  FindMaxCorr<<<blocksMax, threadsMax>>>(d_corrData, sift1, sift2, numPts1, corrWidth, sizeof(SiftPoint));
-  safeCall(cudaDeviceSynchronize());
-  checkMsg("FindMaxCorr() execution failed\n");
-  safeCall(cudaFree(d_corrData));
-#endif
 
 // Version suggested by Nicholas Lin with combined correlation and maximization
 // Global memory reguirement: O(N)
-#if 0 // K40c 51.2ms, 1080 Ti 9.6ms
-  int block_dim = 16;
-  float *d_corrData;
-  int corrSize = numPts1 * block_dim * 2;
-  safeCall(cudaMalloc((void **)&d_corrData, sizeof(float) * corrSize));
-  dim3 blocks(iDivUp(numPts1, block_dim));
-  dim3 threads(block_dim, block_dim); 
-  FindMaxCorr3<<<blocks, threads >>>(d_corrData, sift1, sift2, numPts1, numPts2);
-  safeCall(cudaDeviceSynchronize());
-  checkMsg("FindMaxCorr3() execution failed\n");
-  safeCall(cudaFree(d_corrData));
-#endif
 
 // Combined version with no global memory requirement using one 1 point per block
-#if 0 // K40c 8.9ms, 1080 Ti 2.1ms, 2080 Ti 1.0ms
-  dim3 blocksMax(numPts1);
-  dim3 threadsMax(FMC2W, FMC2H);
-  FindMaxCorr2<<<blocksMax, threadsMax>>>(sift1, sift2, numPts1, numPts2);
-  safeCall(cudaDeviceSynchronize());
-  checkMsg("FindMaxCorr2() execution failed\n");
-#endif
   
 // Combined version with no global memory requirement using one FMC2H points per block
-#if 0 // K40c 9.2ms, 1080 Ti 1.3ms, 2080 Ti 1.1ms
-  dim3 blocksMax2(iDivUp(numPts1, FMC2H));
-  dim3 threadsMax2(FMC2W, FMC2H);
-  FindMaxCorr4<<<blocksMax2, threadsMax2>>>(sift1, sift2, numPts1, numPts2);
-  safeCall(cudaDeviceSynchronize());
-  checkMsg("FindMaxCorr4() execution failed\n");
-#endif
 
 // Combined version with no global memory requirement using global locks
 #if 1
