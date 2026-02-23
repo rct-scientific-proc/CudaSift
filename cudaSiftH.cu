@@ -332,15 +332,9 @@ double ScaleDown(CudaImage &res, CudaImage &src, float variance)
         safeCall(cudaMemcpyToSymbol(d_ScaleDownKernel, h_Kernel, 5 * sizeof(float)));
         oldVariance = variance;
     }
-#if 0
-  dim3 blocks(iDivUp(src.width, SCALEDOWN_W), iDivUp(src.height, SCALEDOWN_H));
-  dim3 threads(SCALEDOWN_W + 4, SCALEDOWN_H + 4);
-  ScaleDownDenseShift<<<blocks, threads>>>(res.d_data, src.d_data, src.width, src.pitch, src.height, res.pitch);
-#else
     dim3 blocks(iDivUp(src.width, SCALEDOWN_W), iDivUp(src.height, SCALEDOWN_H));
     dim3 threads(SCALEDOWN_W + 4);
     ScaleDown<<<blocks, threads>>>(res.d_data, src.d_data, src.width, src.pitch, src.height, res.pitch);
-#endif
     checkMsg("ScaleDown() execution failed\n");
     return 0.0;
 }
@@ -481,21 +475,6 @@ double LaplaceMulti(cudaTextureObject_t texObj, CudaImage &baseImage, CudaImage 
     dim3 blocks(iDivUp(width, LAPLACE_W), height);
     LaplaceMultiMem<<<blocks, threads>>>(baseImage.d_data, results[0].d_data, width, pitch, height, octave);
 #endif
-#if 0
-  dim3 threads(LAPLACE_W+2*LAPLACE_R, LAPLACE_S);
-  dim3 blocks(iDivUp(width, LAPLACE_W), iDivUp(height, LAPLACE_H));
-  LaplaceMultiMemTest<<<blocks, threads>>>(baseImage.d_data, results[0].d_data, width, pitch, height, octave);
-#endif
-#if 0
-  dim3 threads(LAPLACE_W+2*LAPLACE_R, LAPLACE_S);
-  dim3 blocks(iDivUp(width, LAPLACE_W), height);
-  LaplaceMultiMemOld<<<blocks, threads>>>(baseImage.d_data, results[0].d_data, width, pitch, height, octave);
-#endif
-#if 0
-  dim3 threads(LAPLACE_W+2*LAPLACE_R, LAPLACE_S);
-  dim3 blocks(iDivUp(width, LAPLACE_W), height);
-  LaplaceMultiTex<<<blocks, threads>>>(texObj, results[0].d_data, width, pitch, height, octave);
-#endif
     checkMsg("LaplaceMulti() execution failed\n");
     return 0.0;
 }
@@ -510,11 +489,6 @@ double FindPointsMulti(CudaImage *sources, SiftData &siftData, float thresh, flo
     int w = sources->width;
     int p = sources->pitch;
     int h = sources->height;
-#if 0
-  dim3 blocks(iDivUp(w, MINMAX_W)*NUM_SCALES, iDivUp(h, MINMAX_H));
-  dim3 threads(MINMAX_W + 2, MINMAX_H);
-  FindPointsMultiTest<<<blocks, threads>>>(sources->d_data, siftData.d_data, w, p, h, subsampling, lowestScale, thresh, factor, edgeLimit, octave);
-#endif
 #if 1
     dim3 blocks(iDivUp(w, MINMAX_W) * NUM_SCALES, iDivUp(h, MINMAX_H));
     dim3 threads(MINMAX_W + 2);
