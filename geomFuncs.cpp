@@ -1,17 +1,12 @@
 #include <iostream>
 #include <cmath>
-#include <opencv2/core/core.hpp>
 #include "cudaSift.h"
 
 int ImproveHomography(SiftData &data, float *homography, int numLoops, float minScore, float maxAmbiguity, float thresh)
 {
-#ifdef MANAGEDMEM
-    SiftPoint *mpts = data.m_data;
-#else
     if (data.h_data == NULL)
         return 0;
     SiftPoint *mpts = data.h_data;
-#endif
     float limit = thresh * thresh;
     int numPts = data.numPts;
     cv::Mat M(8, 8, CV_64FC1);

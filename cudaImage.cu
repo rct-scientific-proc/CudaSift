@@ -59,9 +59,6 @@ double CudaImage::Download()
     if (d_data != NULL && h_data != NULL)
         safeCall(cudaMemcpy2D(d_data, p, h_data, sizeof(float) * width, sizeof(float) * width, height, cudaMemcpyHostToDevice));
     double gpuTime = timer.read();
-#ifdef VERBOSE
-    printf("Download time =               %.2f ms\n", gpuTime);
-#endif
     return gpuTime;
 }
 
@@ -71,9 +68,6 @@ double CudaImage::Readback()
     int p = sizeof(float) * pitch;
     safeCall(cudaMemcpy2D(h_data, sizeof(float) * width, d_data, p, sizeof(float) * width, height, cudaMemcpyDeviceToHost));
     double gpuTime = timer.read();
-#ifdef VERBOSE
-    printf("Readback time =               %.2f ms\n", gpuTime);
-#endif
     return gpuTime;
 }
 
@@ -85,9 +79,6 @@ double CudaImage::InitTexture()
     if (t_data == NULL)
         printf("Failed to allocated texture data\n");
     double gpuTime = timer.read();
-#ifdef VERBOSE
-    printf("InitTexture time =            %.2f ms\n", gpuTime);
-#endif
     return gpuTime;
 }
 
@@ -110,8 +101,5 @@ double CudaImage::CopyToTexture(CudaImage &dst, bool host)
         safeCall(cudaMemcpyToArray((cudaArray *)dst.t_data, 0, 0, d_data, sizeof(float) * pitch * dst.height, cudaMemcpyDeviceToDevice));
     safeCall(cudaDeviceSynchronize());
     double gpuTime = timer.read();
-#ifdef VERBOSE
-    printf("CopyToTexture time =          %.2f ms\n", gpuTime);
-#endif
     return gpuTime;
 }
