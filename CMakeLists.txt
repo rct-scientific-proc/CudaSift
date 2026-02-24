@@ -1,78 +1,80 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.18)
 
-project(cudaSift)
-set(cudaSift_VERSION_MAJOR 2)
-set(cudaSift_VERSION_MINOR 0)
-set(cudaSift_VERSION_PATCH 0)
+project(cudaSift
+  VERSION 2.0.0
+  LANGUAGES C CXX CUDA
+)
 
-set(CPACK_PACKAGE_VERSION_MAJOR "${cudaSift_VERSION_MAJOR}")
-set(CPACK_PACKAGE_VERSION_MINOR "${cudaSift_VERSION_MINOR}")
-set(CPACK_PACKAGE_VERSION_PATCH "${cudaSift_VERSION_PATCH}")
+# ── Options ──────────────────────────────────────────────
+option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
+
+# ── CUDA architecture ───────────────────────────────────
+# Override with -DCMAKE_CUDA_ARCHITECTURES="75;86" etc.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
+endif()
+
+# ── cusift library ───────────────────────────────────────
+set(LIB_CUDA_SOURCES
+  cudaImage.cu
+  cudaSiftH.cu
+  matching.cu
+)
+
+set(LIB_C_SOURCES
+  geomFuncs.c
+  cusfit.cu
+)
+
+if(CUSIFT_BUILD_SHARED)
+  add_library(cusift SHARED ${LIB_CUDA_SOURCES} ${LIB_C_SOURCES})
+else()
+  add_library(cusift STATIC ${LIB_CUDA_SOURCES} ${LIB_C_SOURCES})
+endif()
+
+# Public headers so consumers get the include path automatically
+target_include_directories(cusift
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_compile_definitions(cusift PRIVATE VERBOSE)
+
+# Platform-specific flags
+if(MSVC)
+  target_compile_options(cusift PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:/O2 /D_CRT_SECURE_NO_WARNINGS>
+    $<$<COMPILE_LANGUAGE:CXX>:/O2 /D_CRT_SECURE_NO_WARNINGS>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O2>
+  )
+  # AVX2 + FMA for geomFuncs.c
+  set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+else()
+  target_compile_options(cusift PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-O2>
+    $<$<COMPILE_LANGUAGE:CXX>:-O2>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O2>
+  )
+  # AVX2 + FMA for geomFuncs.c
+  set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+endif()
+
+# cudart is linked automatically by CMake when CUDA is a project language
+
+# ── Install ──────────────────────────────────────────────
+include(GNUInstallDirs)
+
+install(TARGETS cusift
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(FILES cusift.h cudaSift.h cudaImage.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cusift
+)
+
+# ── CPack ────────────────────────────────────────────────
 set(CPACK_GENERATOR "ZIP")
 include(CPack)
-
-find_package(OpenCV REQUIRED)
-find_package(CUDA)
-if (NOT CUDA_FOUND)
-  message(STATUS "CUDA not found. Project will not be built.")
-endif(NOT CUDA_FOUND)
-
-if (WIN32)
-  set(EXTRA_CXX_FLAGS "/DVERBOSE /D_CRT_SECURE_NO_WARNINGS ")
-  list(APPEND CUDA_NVCC_FLAGS "-arch=sm_35;--compiler-options;-O2;-DVERBOSE") 
-endif()
-if (UNIX)
-  if (APPLE)
-    set(EXTRA_CXX_FLAGS "-DVERBOSE -msse2")
-    list(APPEND CUDA_NVCC_FLAGS "-arch=sm_35;--compiler-options;-O2;-DVERBOSE") 
-  else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -msse2 ")
-    list(APPEND CUDA_NVCC_FLAGS "-lineinfo;-ccbin;/usr/bin/gcc-6;--compiler-options;-O2;-D_FORCE_INLINES;-DVERBOSE_NOT") 
-  endif()
-endif()
-
-set(cuda_sources
-  cudaImage.cu  
-  cudaImage.h  
-  cudaSiftH.cu 
-  cudaSiftH.h  
-  matching.cu  
-  cudaSiftD.h  
-  cudaSift.h  
-  cudautils.h
-)  
-
-set(sources
-  geomFuncs.cpp  
-  mainSift.cpp  
-)
-
-include_directories(
-  ${CMAKE_CURRENT_SOURCE_DIR} 
-)
-
-#SET(CUDA_SEPARABLE_COMPILATION ON)
-
-cuda_add_executable(cudasift ${cuda_sources} ${sources} OPTIONS -arch=sm_35)
-
-#cuda_add_executable(l2net l2netD.cu OPTIONS -arch=sm_35)
-
-set_target_properties(cudasift PROPERTIES
-  COMPILE_FLAGS "${EXTRA_CXX_FLAGS}"			   
-)
-
-target_link_libraries(cudasift ${CUDA_cudadevrt_LIBRARY} ${OpenCV_LIBS})
-#  /usr/local/cuda/lib64/libcudadevrt.a ${OpenCV_LIBS} 
-#)
- 
-install(FILES 
-  ${cuda_sources} 
-  ${sources}
-  cudaSiftD.cu
-  CMakeLists.txt
-  Copyright.txt
-  DESTINATION .
-)
-install(FILES data/left.pgm data/righ.pgm
-  DESTINATION data
-)

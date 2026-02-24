@@ -1,0 +1,5 @@
+C:/Users/ryant/code/CudaSift/CudaSift/build/CMakeFiles/cusift.dir
+C:/Users/ryant/code/CudaSift/CudaSift/build/CMakeFiles/PACKAGE.dir
+C:/Users/ryant/code/CudaSift/CudaSift/build/CMakeFiles/INSTALL.dir
+C:/Users/ryant/code/CudaSift/CudaSift/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/ryant/code/CudaSift/CudaSift/build/CMakeFiles/ZERO_CHECK.dir

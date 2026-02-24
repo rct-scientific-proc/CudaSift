@@ -5,9 +5,15 @@
 #ifndef CUDAIMAGE_H
 #define CUDAIMAGE_H
 
-class CudaImage
+#include <stdbool.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct
 {
-public:
     int width, height;
     int pitch;
     float *h_data;
@@ -15,22 +21,21 @@ public:
     float *t_data;
     bool d_internalAlloc;
     bool h_internalAlloc;
+} CudaImage;
 
-public:
-    CudaImage();
-    ~CudaImage();
-    void Allocate(int width, int height, int pitch, bool withHost, float *devMem = NULL, float *hostMem = NULL);
-    double Download();
-    double Readback();
-    double InitTexture();
-    double CopyToTexture(CudaImage &dst, bool host);
-};
+void CudaImage_init(CudaImage *img);
+void CudaImage_destroy(CudaImage *img);
+void CudaImage_Allocate(CudaImage *img, int width, int height, int pitch, bool withHost, float *devMem, float *hostMem);
+double CudaImage_Download(CudaImage *img);
+double CudaImage_Readback(CudaImage *img);
 
 int iDivUp(int a, int b);
 int iDivDown(int a, int b);
 int iAlignUp(int a, int b);
 int iAlignDown(int a, int b);
-void StartTimer(unsigned int *hTimer);
-double StopTimer(unsigned int hTimer);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // CUDAIMAGE_H
