@@ -163,8 +163,15 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
             float err_sq = dx * dx + dy * dy;
 
             /* Huber weight: 1 for inliers, thresh/err for outliers */
-            float wei = (err_sq <= limit) ? 1.0f
-                                          : thresh * fast_rsqrtf(err_sq);
+            //float wei = (err_sq <= limit) ? 1.0f
+            //                              : thresh * fast_rsqrtf(err_sq);
+
+            /* Tukey's biweight: (1 - (err/thresh)^2)^2 for inliers, 0 for outliers */
+            //float r = sqrtf(err_sq) / thresh;
+            //float wei = (r < 1.0f) ? powf(1.0f - r * r, 2) : 0.0f;
+
+            /* Binary weight */
+            float wei = (err_sq <= limit) ? 1.0f : 0.0f;
 
             /* --- x-equation contribution --- */
             Y[0] = xp;  Y[1] = yp;  Y[2] = 1.0f;

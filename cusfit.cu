@@ -40,7 +40,7 @@ void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const Extra
         image->host_img_);
     
     CudaImage_Download(cuda_image.get());
-    CudaImage_Normalize(cuda_image.get());
+    //CudaImage_Normalize(cuda_image.get());
 
     // Get the smallest dimension of the image to determine the maximum number of octaves
     int minDim = std::min(image->width_, image->height_);
@@ -170,7 +170,7 @@ void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2, SiftData*
     CudaImage_Allocate(cuda_image1.get(), image1->width_, image1->height_,
                        p_iAlignUp(image1->width_, 128), false, nullptr, image1->host_img_);
     CudaImage_Download(cuda_image1.get());
-    CudaImage_Normalize(cuda_image1.get());
+    //CudaImage_Normalize(cuda_image1.get());
     ExtractSift(sift_data1, cuda_image1.get(), octaves,
                 extract_options->init_blur_, extract_options->thresh_,
                 extract_options->lowest_scale_, extract_options->edge_thresh_,
@@ -181,7 +181,7 @@ void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2, SiftData*
     CudaImage_Allocate(cuda_image2.get(), image2->width_, image2->height_,
                        p_iAlignUp(image2->width_, 128), false, nullptr, image2->host_img_);
     CudaImage_Download(cuda_image2.get());
-    CudaImage_Normalize(cuda_image2.get());
+    //CudaImage_Normalize(cuda_image2.get());
     ExtractSift(sift_data2, cuda_image2.get(), octaves,
                 extract_options->init_blur_, extract_options->thresh_,
                 extract_options->lowest_scale_, extract_options->edge_thresh_,

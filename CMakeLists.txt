@@ -14,6 +14,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ── Options ──────────────────────────────────────────────
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
 
+# ── OpenMP ───────────────────────────────────────────────
+find_package(OpenMP)
+
 # ── CUDA architecture ───────────────────────────────────
 # Override with -DCMAKE_CUDA_ARCHITECTURES="75;86" etc.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
@@ -30,6 +33,7 @@ set(LIB_CUDA_SOURCES
 set(LIB_C_SOURCES
   geomFuncs.c
   cusfit.cu
+  imwarp.cu
 )
 
 if(CUSIFT_BUILD_SHARED)
@@ -76,6 +80,11 @@ else()
 endif()
 
 # cudart is linked automatically by CMake when CUDA is a project language
+
+# Link OpenMP if available
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(cusift PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # ── Demo executable ──────────────────────────────────────
 add_executable(cusift_demo test/main.cpp)

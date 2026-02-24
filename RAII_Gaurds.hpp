@@ -67,6 +67,9 @@ public:
     T* get() { return device_ptr_; }
     const T* get() const { return device_ptr_; }
 
+    // Release ownership of the pointer without freeing it
+    T* release() { T* p = device_ptr_; device_ptr_ = nullptr; return p; }
+
     // We need to return a reference to the pointer for cudaMalloc / cudaMalloc2D
     T*& getRef() { return device_ptr_; }
 };
@@ -88,6 +91,9 @@ public:
     void reset(T* p) { free(host_ptr_); host_ptr_ = p; }
     T* get() { return host_ptr_; }
     const T* get() const { return host_ptr_; }
+
+    // Release ownership of the pointer without freeing it
+    T* release() { T* p = host_ptr_; host_ptr_ = nullptr; return p; }
 };
 
 // ====== CUDA Texture Object RAII Guard ======

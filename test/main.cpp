@@ -1,5 +1,9 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include "cusift.h"
 
 #include <cstdio>
@@ -7,6 +11,7 @@
 #include <cstring>
 #include <cmath>
 #include <vector>
+#include <string>
 
 // Load an image as a row-major float array (grayscale).
 // Returns the pixel data via *out_pixels; caller must free() it.
@@ -197,8 +202,32 @@ int main(int argc, char** argv)
     // ── Cleanup ─────────────────────────────────────────
     DeleteSiftData(&sift1);
     DeleteSiftData(&sift2);
+
+
+    // Imwarp
+    Image_t warped1, warped2;
+    WarpImages(&image1, &image2, homography, &warped1, &warped2, true);
+
+    // Save warped images <img1>_warped.png and <img2>_warped.png
+    std::string warped1_path = std::string(img1_path).substr(0, std::string(img1_path).find_last_of('.')) + "_warped.png";
+    std::string warped2_path = std::string(img2_path).substr(0, std::string(img2_path).find_last_of('.')) + "_warped.png";
+
+    std::vector<uint8_t> warped1_u8(warped1.width_ * warped1.height_);
+    std::vector<uint8_t> warped2_u8(warped2.width_ * warped2.height_);
+
+    for (int i = 0; i < warped1.width_ * warped1.height_; i++)
+        warped1_u8[i] = (uint8_t)std::min(std::max(warped1.host_img_[i], 0.0f), 255.0f);
+    for (int i = 0; i < warped2.width_ * warped2.height_; i++)
+        warped2_u8[i] = (uint8_t)std::min(std::max(warped2.host_img_[i], 0.0f), 255.0f);
+    
+    // Write the uint8_t images to disk
+    stbi_write_png(warped1_path.c_str(), warped1.width_, warped1.height_, 1, warped1_u8.data(), warped1.width_);
+    stbi_write_png(warped2_path.c_str(), warped2.width_, warped2.height_, 1, warped2_u8.data(), warped2.width_);
+
     free(pixels1);
     free(pixels2);
+    free(warped1.host_img_);
+    free(warped2.host_img_);
 
     printf("Done.\n");
     return 0;

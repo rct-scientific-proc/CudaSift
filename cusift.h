@@ -176,6 +176,19 @@ CUSIFT_API void MatchSiftData(SiftData* data1, SiftData* data2);
 CUSIFT_API void FindHomography(SiftData* data, float* homography, int* num_matches, const FindHomographyOptions_t* options);
 
 /**
+ * @brief Given the computed homography, warp the input images to align them. The warped images are returned in the 'warped_image1' and 'warped_image2' output parameters. The caller is responsible for ensuring that the input images and homography are valid before calling this function, and for freeing any resources associated with the warped images when done.
+ * To free the warped images call the cstdlib free() function on the 'host_img_' field of the Image_t structures, and set the pointer to nullptr to avoid dangling pointers. We use malloc to allocate space for the warped images.
+ * 
+ * @param image1 Pointer to the first input image.
+ * @param image2 Pointer to the second input image.
+ * @param homography Pointer to a 3x3 matrix in row-major order representing the homography transformation.
+ * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored.
+ * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored.
+ * @param useGPU Boolean flag indicating whether to use GPU acceleration for the warping operation.
+ */
+CUSIFT_API void WarpImages(const Image_t* image1, const Image_t* image2, const float* homography, Image_t* warped_image1, Image_t* warped_image2, bool useGPU);
+
+/**
  * @brief Delete a SiftData structure and free all associated resources. After calling this function, the SiftData pointer should not be used again unless it is re-initialized. The caller is responsible for ensuring that the SiftData structure was properly initialized and contains valid data before calling this function.
  * 
  * @param sift_data Pointer to the SiftData structure to be deleted.
