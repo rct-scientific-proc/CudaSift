@@ -78,7 +78,8 @@ void FindHomography(SiftData* data, float* homography, int* num_matches, const F
         options->num_loops_,
         options->min_score_,
         options->max_ambiguity_,
-        options->thresh_);
+        options->thresh_,
+        options->seed_);
     
     ImproveHomography(
         data,
@@ -196,7 +197,8 @@ void ExtractAndMatchAndFindHomography(const Image_t* image1, const Image_t* imag
         homography_options->num_loops_,
         homography_options->min_score_,
         homography_options->max_ambiguity_,
-        homography_options->thresh_);
+        homography_options->thresh_,
+        homography_options->seed_);
 
     ImproveHomography(
         sift_data1, homography,

@@ -2,6 +2,8 @@
 #include "cudautils.h"
 #include "RAII_Gaurds.hpp"
 
+#include <random>
+
 //================= Device matching functions =====================//
 
 #define FMC2W 16
@@ -350,8 +352,33 @@ __global__ void TestHomographies(float *d_coord, float *d_homo,
 
 //================= Host matching functions =====================//
 
+// Generate 4 distinct random point indices per RANSAC iteration
+static void GenerateRandomSamples(int *h_randPts, int numLoops, const int *validPts, int numValid, unsigned int seed = 0)
+{
+    std::mt19937 rng(seed ? seed : std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, numValid - 1);
+
+    for (int i = 0; i < numLoops; i++)
+    {
+        int p1 = dist(rng);
+        int p2 = dist(rng);
+        int p3 = dist(rng);
+        int p4 = dist(rng);
+        while (p2 == p1)
+            p2 = dist(rng);
+        while (p3 == p1 || p3 == p2)
+            p3 = dist(rng);
+        while (p4 == p1 || p4 == p2 || p4 == p3)
+            p4 = dist(rng);
+        h_randPts[i + 0 * numLoops] = validPts[p1];
+        h_randPts[i + 1 * numLoops] = validPts[p2];
+        h_randPts[i + 2 * numLoops] = validPts[p3];
+        h_randPts[i + 3 * numLoops] = validPts[p4];
+    }
+}
+
 // Keep
-double FindHomography_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh)
+double FindHomography_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh, unsigned int seed)
 {
     *numMatches = 0;
     homography[0] = homography[4] = homography[8] = 1.0f;
@@ -396,23 +423,7 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     // h_scores and h_ambiguities freed here automatically via guards
     if (numValid >= 8)
     {
-        for (int i = 0; i < numLoops; i++)
-        {
-            int p1 = rand() % numValid;
-            int p2 = rand() % numValid;
-            int p3 = rand() % numValid;
-            int p4 = rand() % numValid;
-            while (p2 == p1)
-                p2 = rand() % numValid;
-            while (p3 == p1 || p3 == p2)
-                p3 = rand() % numValid;
-            while (p4 == p1 || p4 == p2 || p4 == p3)
-                p4 = rand() % numValid;
-            h_randPts[i + 0 * numLoops] = validPts[p1];
-            h_randPts[i + 1 * numLoops] = validPts[p2];
-            h_randPts[i + 2 * numLoops] = validPts[p3];
-            h_randPts[i + 3 * numLoops] = validPts[p4];
-        }
+        GenerateRandomSamples(h_randPts, numLoops, validPts, numValid, seed);
         safeCall(cudaMemcpy(d_randPts, h_randPts, randSize, cudaMemcpyHostToDevice));
         safeCall(cudaMemcpy2D(&d_coord[0 * numPtsUp], szFl, &d_sift[0].xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
         safeCall(cudaMemcpy2D(&d_coord[1 * numPtsUp], szFl, &d_sift[0].ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));

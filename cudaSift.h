@@ -17,7 +17,7 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
 void InitSiftData(SiftData *data, int num, bool host, bool dev);
 void FreeSiftData(SiftData *data);
 double MatchSiftData_private(SiftData *data1, SiftData *data2);
-double FindHomography_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh);
+double FindHomography_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh, unsigned int seed);
 
 
 #ifdef __cplusplus

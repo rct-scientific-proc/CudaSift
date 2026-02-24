@@ -22,6 +22,7 @@ from ctypes import (
     c_float,
     c_int,
     c_void_p,
+    c_uint,
 )
 from pathlib import Path
 
@@ -88,6 +89,7 @@ class FindHomographyOptions_t(Structure):
         ("improve_min_score_", c_float),
         ("improve_max_ambiguity_", c_float),
         ("improve_thresh_", c_float),
+        ("seed_", c_uint),
     ]
 
 
@@ -244,6 +246,7 @@ def main() -> None:
         improve_min_score_=0.0,
         improve_max_ambiguity_=0.80,
         improve_thresh_=3.0,
+        seed_=42,
     )
 
     homography = (c_float * 9)()

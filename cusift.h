@@ -49,7 +49,7 @@ typedef struct
     SiftPoint *d_data; // Device (GPU) data
 } SiftData;
 
-typedef struct 
+typedef struct
 {
     float* host_img_;
     int width_;
@@ -77,6 +77,8 @@ typedef struct
     float improve_min_score_;
     float improve_max_ambiguity_;
     float improve_thresh_;
+
+    unsigned int seed_; // 0 = non-deterministic (random_device)
 } FindHomographyOptions_t;
 
 /**

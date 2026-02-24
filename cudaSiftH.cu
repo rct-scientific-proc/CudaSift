@@ -7,6 +7,8 @@
 #include <cmath>
 #include <iostream>
 #include <algorithm>
+#include <thrust/sort.h>
+
 #include "cudautils.h"
 
 #include "cudaImage.h"
@@ -16,6 +18,18 @@
 #include "RAII_Gaurds.hpp"
 
 #include "cudaSiftD.cu"
+
+struct SiftPointCompare
+{
+    __host__ __device__ bool operator()(const SiftPoint &a, const SiftPoint &b) const
+    {
+        if (a.ypos != b.ypos)
+            return a.ypos < b.ypos;
+        if (a.xpos != b.xpos)
+            return a.xpos < b.xpos;
+        return a.scale < b.scale;
+    }
+};
 
 // Keep
 void InitCuda(int devNum)
@@ -108,9 +122,16 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     safeCall(cudaMemcpy(&siftData->numPts, &d_PointCounterAddr[2 * numOctaves], sizeof(int), cudaMemcpyDeviceToHost));
     siftData->numPts = (siftData->numPts < siftData->maxPts ? siftData->numPts : siftData->maxPts);
 
+    // Sync device before sorting and copying to host
+    safeCall(cudaDeviceSynchronize());
+
+    // Sort by ypos, then xpos, then scale using thrust
+    thrust::sort(thrust::device, siftData->d_data, siftData->d_data + siftData->numPts, SiftPointCompare());
+
     if (siftData->h_data)
         safeCall(cudaMemcpy(siftData->h_data, siftData->d_data, sizeof(SiftPoint) * siftData->numPts, cudaMemcpyDeviceToHost));
     // lowImgGuard and memoryTmpGuard are cleaned up automatically
+
 }
 
 // Keep

@@ -122,6 +122,7 @@ int main(int argc, char** argv)
     homo_opts.improve_min_score_      = 0.0f;
     homo_opts.improve_max_ambiguity_  = 0.80f;
     homo_opts.improve_thresh_         = 3.0f;
+    homo_opts.seed_                   = 42;
 
     printf("Finding homography...\n");
     FindHomography(&sift1, homography, &num_matches, &homo_opts);
