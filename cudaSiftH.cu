@@ -115,10 +115,10 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     CudaImageGuard lowImgGuard;
     CudaImage_Allocate(lowImgGuard.get(), width, height, iAlignUp(width, 128), false, memorySub, NULL);
     float kernel[8 * 12 * 16];
-    PrepareLaplaceKernels(numOctaves, 0.0f, kernel);
+    PrepareLaplaceKernels(numOctaves, initBlur, kernel);
     safeCall(cudaMemcpyToSymbolAsync(d_LaplaceKernel, kernel, 8 * 12 * 16 * sizeof(float)));
     LowPass(lowImgGuard.get(), img, max(initBlur, 0.001f));
-    ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, 0.0f, thresh, lowestScale, edgeLimit, 1.0f, memoryTmp, memorySub + height * iAlignUp(width, 128));
+    ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, initBlur, thresh, lowestScale, edgeLimit, 1.0f, memoryTmp, memorySub + height * iAlignUp(width, 128));
     safeCall(cudaMemcpy(&siftData->numPts, &d_PointCounterAddr[2 * numOctaves], sizeof(int), cudaMemcpyDeviceToHost));
     siftData->numPts = (siftData->numPts < siftData->maxPts ? siftData->numPts : siftData->maxPts);
 

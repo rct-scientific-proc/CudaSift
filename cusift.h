@@ -56,6 +56,67 @@ typedef struct
     int height_;
 } Image_t;
 
+/**
+ * @brief Options controlling SIFT feature extraction.
+ *
+ * These parameters govern the Difference-of-Gaussians (DoG) keypoint
+ * detector and the SIFT descriptor computation.  Typical defaults are
+ * shown in square brackets after each field.
+ *
+ * ── Detector thresholds ──────────────────────────────────────────────
+ *
+ *   thresh_        [~2.0-5.0]
+ *       Contrast threshold applied to DoG extrema.  A candidate
+ *       keypoint is accepted only when its absolute DoG response
+ *       exceeds this value.  Higher values reject low-contrast
+ *       features and produce fewer, more stable keypoints.
+ *       Lower values retain weaker features at the cost of more
+ *       noise.
+ *
+ *   lowest_scale_  [~0.0]
+ *       Minimum feature scale (in pixels of the original image)
+ *       that will be kept.  Keypoints whose estimated scale is
+ *       below this cutoff are discarded.  Set to 0.0 to keep all
+ *       detected scales.  Increasing this suppresses very
+ *       fine-grained features.
+ *
+ *   edge_thresh_   [~10.0]
+ *       Edge rejection threshold (ratio of principal curvatures).
+ *       Candidates whose (trace²/determinant) of the 2×2 Hessian
+ *       exceeds this limit are considered edge responses rather
+ *       than corners and are discarded.  Lower values are stricter
+ *       (reject more edges); higher values are more permissive.
+ *       Lowe's original paper uses (r+1)²/r with r=10, giving
+ *       a value of ~12.1.
+ *
+ * ── Scale-space construction ─────────────────────────────────────────
+ *
+ *   init_blur_     [~1.0]
+ *       Assumed blur level (sigma) of the input image.  The
+ *       library applies a low-pass filter so that the effective
+ *       blur of the base image matches the first scale of the
+ *       Gaussian pyramid. A value of 0.0
+ *       means the input is essentially unblurred.
+ *
+ *   num_octaves_   [5]
+ *       Number of octave levels in the scale-space pyramid.  Each
+ *       successive octave halves the image resolution.  The
+ *       library will silently clamp this to the maximum feasible
+ *       value based on the image dimensions (approximately
+ *       log2(min(width,height)) - 3), and emit a warning if the
+ *       requested count exceeds that limit.  More octaves detect
+ *       larger-scale features but increase computation.
+ *
+ * ── Capacity ─────────────────────────────────────────────────────────
+ *
+ *   max_keypoints_ [~8192]
+ *       Maximum number of keypoints that will be returned.  This
+ *       controls the size of the pre-allocated SiftData buffers
+ *       on both host and device.  If the detector finds more
+ *       candidates than this limit, the excess are silently
+ *       dropped.  Set this high enough for your application to
+ *       avoid losing valid features.
+ */
 typedef struct
 {
     float thresh_;

@@ -28,6 +28,7 @@ void CudaImage_destroy(CudaImage *img);
 void CudaImage_Allocate(CudaImage *img, int width, int height, int pitch, bool withHost, float *devMem, float *hostMem);
 void CudaImage_Download(CudaImage *img);
 void CudaImage_Readback(CudaImage *img);
+void CudaImage_Normalize(CudaImage *img);
 
 int iDivUp(int a, int b);
 int iDivDown(int a, int b);
