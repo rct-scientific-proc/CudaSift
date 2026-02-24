@@ -11,25 +11,6 @@
 #include <omp.h>
 
 
-/*
-box2 = [1  size(im2,2) size(im2,2)  1 ;
-        1  1           size(im2,1)  size(im2,1) ;
-        1  1           1            1 ] ;
-box2_ = inv(homography) * box2 ;
-box2_(1,:) = box2_(1,:) ./ box2_(3,:) ;
-box2_(2,:) = box2_(2,:) ./ box2_(3,:) ;
-ur = min([1 box2_(1,:)]):max([size(im1,2) box2_(1,:)]) ;
-vr = min([1 box2_(2,:)]):max([size(im1,1) box2_(2,:)]) ;
-
-[u,v] = meshgrid(ur,vr) ;
-im1_ = vl_imwbackward(im2double(im1),u,v) ;     // interp2
-
-z_ = homography(3,1) * u + homography(3,2) * v + homography(3,3) ;
-u_ = (homography(1,1) * u + homography(1,2) * v + homography(1,3)) ./ z_ ;
-v_ = (homography(2,1) * u + homography(2,2) * v + homography(2,3)) ./ z_ ;
-im2_ = vl_imwbackward(im2double(im2),u_,v_) ;   // interp2
-*/
-
 // ── Helper: 3x3 matrix inverse (row-major) ──────────────
 static bool Invert3x3(const float* M, float* out)
 {
