@@ -33,7 +33,6 @@ set(LIB_CUDA_SOURCES
 set(LIB_C_SOURCES
   geomFuncs.c
   cusfit.cu
-  imwarp.cu
 )
 
 if(CUSIFT_BUILD_SHARED)

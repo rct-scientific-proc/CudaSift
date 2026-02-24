@@ -168,45 +168,17 @@ int main(int argc, char** argv)
     Image_t image1 = { pixels1, w1, h1 };
     Image_t image2 = { pixels2, w2, h2 };
 
-    // ── Extract SIFT features ───────────────────────────
+    // Imwarp
+    Image_t warped1, warped2;
     SiftData sift1, sift2;
-    memset(&sift1, 0, sizeof(sift1));
-    memset(&sift2, 0, sizeof(sift2));
-
-    printf("Extracting SIFT features from image 1...\n");
-    ExtractSiftFromImage(&image1, &sift1, &extract_opts);
-    printf("  Found %d keypoints\n", sift1.numPts);
-
-    printf("Extracting SIFT features from image 2...\n");
-    ExtractSiftFromImage(&image2, &sift2, &extract_opts);
-    printf("  Found %d keypoints\n", sift2.numPts);
-
-    // ── Match SIFT features ─────────────────────────────
-    printf("Matching SIFT features...\n");
-    MatchSiftData(&sift1, &sift2);
-
-    // ── Find homography ─────────────────────────────────
     float homography[9];
     int num_matches = 0;
 
-    printf("Finding homography...\n");
-    FindHomography(&sift1, homography, &num_matches, &homo_opts);
-    printf("  Matches (inliers): %d\n", num_matches);
+    ExtractAndMatchAndFindHomographyAndWarp(&image1, &image2, &sift1, &sift2, homography, &num_matches, &extract_opts, &homo_opts, &warped1, &warped2);
+
+    printf("Found %d matches\n", num_matches);
     PrintHomography(homography);
 
-    // ── Save SIFT data to JSON ──────────────────────────
-    printf("Saving SIFT data to %s and %s...\n", out1_path, out2_path);
-    SaveSiftData(out1_path, &sift1);
-    SaveSiftData(out2_path, &sift2);
-
-    // ── Cleanup ─────────────────────────────────────────
-    DeleteSiftData(&sift1);
-    DeleteSiftData(&sift2);
-
-
-    // Imwarp
-    Image_t warped1, warped2;
-    WarpImages(&image1, &image2, homography, &warped1, &warped2, true);
 
     // Save warped images <img1>_warped.png and <img2>_warped.png
     std::string warped1_path = std::string(img1_path).substr(0, std::string(img1_path).find_last_of('.')) + "_warped.png";

@@ -228,6 +228,23 @@ CUSIFT_API void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2
  */
 CUSIFT_API void ExtractAndMatchAndFindHomography(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, float* homography, int* num_matches, const ExtractSiftOptions_t* extract_options, const FindHomographyOptions_t* homography_options);
 
+/**
+ * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done.
+ * This function is useful for applications that require both feature matching and image alignment, such as panorama stitching or object recognition. It provides a streamlined interface for performing the entire workflow with a single function call.
+ * 
+ * @param image1 Pointer to the first input image.
+ * @param image2 Pointer to the second input image.
+ * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
+ * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+ * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
+ * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
+ * @param extract_options ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+ * @param homography_options FindHomographyOptions_t structure containing parameters for homography computation.
+ * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
+ * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
+ */
+CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, float* homography, int* num_matches, const ExtractSiftOptions_t* extract_options, const FindHomographyOptions_t* homography_options, Image_t* warped_image1, Image_t* warped_image2);
+
 
 #ifdef __cplusplus
 }
