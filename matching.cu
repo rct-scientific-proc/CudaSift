@@ -434,6 +434,7 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     safeCall(cudaFree(d_homo));
     safeCall(cudaFree(d_randPts));
     safeCall(cudaFree(d_coord));
+    return 0.0;
 }
 
 // Keep
@@ -451,7 +452,6 @@ double MatchSiftData_private(SiftData *data1, SiftData *data2)
     dim3 blocksMax3(iDivUp(numPts1, 16), iDivUp(numPts2, 512));
     dim3 threadsMax3(16, 16);
     CleanMatches<<<iDivUp(numPts1, 64), 64>>>(sift1, numPts1);
-    int mode = 10;
         blocksMax3 = dim3(iDivUp(numPts1, M7W));
         threadsMax3 = dim3(M7W, M7H / M7R);
         FindMaxCorr10<<<blocksMax3, threadsMax3>>>(sift1, sift2, numPts1, numPts2);
@@ -466,4 +466,5 @@ double MatchSiftData_private(SiftData *data1, SiftData *data2)
         safeCall(cudaMemcpy2D(h_ptr, sizeof(SiftPoint), d_ptr, sizeof(SiftPoint), 5 * sizeof(float), data1->numPts, cudaMemcpyDeviceToHost));
     }
 
+    return 0.0;
 }

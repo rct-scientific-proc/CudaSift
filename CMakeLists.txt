@@ -44,17 +44,17 @@ target_compile_definitions(cusift PRIVATE VERBOSE)
 # Platform-specific flags
 if(MSVC)
   target_compile_options(cusift PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:/O2 /D_CRT_SECURE_NO_WARNINGS>
-    $<$<COMPILE_LANGUAGE:CXX>:/O2 /D_CRT_SECURE_NO_WARNINGS>
-    $<$<COMPILE_LANGUAGE:CUDA>:-O2>
+    $<$<COMPILE_LANGUAGE:C>:/W4 /O2 /D_CRT_SECURE_NO_WARNINGS>
+    $<$<COMPILE_LANGUAGE:CXX>:/W4 /O2 /D_CRT_SECURE_NO_WARNINGS>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O2 --Werror cross-execution-space-call -Xcompiler=/W4>
   )
   # AVX2 + FMA for geomFuncs.c
   set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
   target_compile_options(cusift PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-O2>
-    $<$<COMPILE_LANGUAGE:CXX>:-O2>
-    $<$<COMPILE_LANGUAGE:CUDA>:-O2>
+    $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Wpedantic -O2>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -O2>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O2 --Werror cross-execution-space-call -Xcompiler=-Wall,-Wextra>
   )
   # AVX2 + FMA for geomFuncs.c
   set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")

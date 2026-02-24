@@ -26,8 +26,8 @@ typedef struct
 void CudaImage_init(CudaImage *img);
 void CudaImage_destroy(CudaImage *img);
 void CudaImage_Allocate(CudaImage *img, int width, int height, int pitch, bool withHost, float *devMem, float *hostMem);
-double CudaImage_Download(CudaImage *img);
-double CudaImage_Readback(CudaImage *img);
+void CudaImage_Download(CudaImage *img);
+void CudaImage_Readback(CudaImage *img);
 
 int iDivUp(int a, int b);
 int iDivDown(int a, int b);

@@ -8,11 +8,7 @@
 #include <iostream>
 #include <algorithm>
 
-
-static inline int p_iDivUp(int a, int b) { return (a % b != 0) ? (a / b + 1) : (a / b); }
-static inline int p_iDivDown(int a, int b) { return a / b; }
-static inline int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
-static inline int p_iAlignDown(int a, int b) { return a - a % b; }
+static int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
 
 void InitializeCudaSift()
 {

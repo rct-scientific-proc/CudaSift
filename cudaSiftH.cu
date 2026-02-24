@@ -168,8 +168,6 @@ void ExtractSiftOctave(SiftData *siftData, CudaImage *img, int octave, float thr
     cudaTextureObject_t texObj = 0;
     cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL);
 
-    float baseBlur = pow(2.0f, -1.0f / NUM_SCALES);
-    float diffScale = pow(2.0f, 1.0f / NUM_SCALES);
     LaplaceMulti(texObj, img, diffImg, octave);
     FindPointsMulti(diffImg, siftData, thresh, 10.0f, 1.0f / NUM_SCALES, lowestScale / subsampling, subsampling, octave);
     ComputeOrientations(texObj, img, siftData, octave);
@@ -225,7 +223,7 @@ double ScaleDown(CudaImage *res, CudaImage *src, float variance)
         float kernelSum = 0.0f;
         for (int j = 0; j < 5; j++)
         {
-            h_Kernel[j] = (float)expf(-(double)(j - 2) * (j - 2) / 2.0 / variance);
+            h_Kernel[j] = expf(-(float)(j - 2) * (j - 2) / 2.0f / variance);
             kernelSum += h_Kernel[j];
         }
         for (int j = 0; j < 5; j++)
@@ -241,7 +239,7 @@ double ScaleDown(CudaImage *res, CudaImage *src, float variance)
 }
 
 // Keep
-double ComputeOrientations(cudaTextureObject_t texObj, CudaImage *src, SiftData *siftData, int octave)
+double ComputeOrientations(cudaTextureObject_t texObj, CudaImage * /*src*/, SiftData *siftData, int octave)
 {
     dim3 blocks(512);
     dim3 threads(11 * 11);
@@ -271,7 +269,7 @@ double LowPass(CudaImage *res, CudaImage *src, float scale)
         float ivar2 = 1.0f / (2.0f * scale * scale);
         for (int j = -LOWPASS_R; j <= LOWPASS_R; j++)
         {
-            kernel[j + LOWPASS_R] = (float)expf(-(double)j * j * ivar2);
+            kernel[j + LOWPASS_R] = expf(-(float)j * j * ivar2);
             kernelSum += kernel[j + LOWPASS_R];
         }
         for (int j = -LOWPASS_R; j <= LOWPASS_R; j++)
@@ -307,7 +305,7 @@ void PrepareLaplaceKernels(int numOctaves, float initBlur, float *kernel)
         float var = scale * scale - initBlur * initBlur;
         for (int j = 0; j <= LAPLACE_R; j++)
         {
-            kernel[numOctaves * 12 * 16 + 16 * i + j] = (float)expf(-(double)j * j / 2.0 / var);
+            kernel[numOctaves * 12 * 16 + 16 * i + j] = expf(-(float)j * j / 2.0f / var);
             kernelSum += (j == 0 ? 1 : 2) * kernel[numOctaves * 12 * 16 + 16 * i + j];
         }
         for (int j = 0; j <= LAPLACE_R; j++)
@@ -317,7 +315,7 @@ void PrepareLaplaceKernels(int numOctaves, float initBlur, float *kernel)
 }
 
 // Keep
-double LaplaceMulti(cudaTextureObject_t texObj, CudaImage *baseImage, CudaImage *results, int octave)
+double LaplaceMulti(cudaTextureObject_t /*texObj*/, CudaImage *baseImage, CudaImage *results, int octave)
 {
     int width = results[0].width;
     int pitch = results[0].pitch;
