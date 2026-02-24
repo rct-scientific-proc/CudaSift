@@ -184,6 +184,7 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
             int angp = (angi < 7 ? angi + 1 : 0);
             angf -= angi;
             float iangf = 1.0f - angf;
+            angi &= 7; // Wrap angi=8 to 0 (circular orientation bins)
 
             int hist = 8 * (4 * veri + hori); // Each gradient measure is interpolated
             int p1 = angi + hist;             // in angles, xpos and ypos -> 8 stores
