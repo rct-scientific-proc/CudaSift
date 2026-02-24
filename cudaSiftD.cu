@@ -233,6 +233,7 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
         float tsum1 = sums[0] + sums[1] + sums[2] + sums[3];
         tsum1 = min(buffer[idx] * rsqrtf(tsum1), 0.2f);
 
+        __syncthreads(); // Ensure all threads have read sums[] before any thread overwrites it
         sum = tsum1 * tsum1;
         for (int i = 16; i > 0; i /= 2)
             sum += ShiftDown(sum, i);
@@ -452,6 +453,7 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
         }
     }
 
+    __syncthreads(); // Ensure all threads have finished writing to points[] before any thread reads
     totbits = Shuffle(totbits, 31);
     if (tx < totbits)
     {
