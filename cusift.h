@@ -65,7 +65,7 @@ typedef struct
  *
  * ── Detector thresholds ──────────────────────────────────────────────
  *
- *   thresh_        [~2.0-5.0]
+ *   thresh_        [~0.02-0.10]
  *       Contrast threshold applied to DoG extrema.  A candidate
  *       keypoint is accepted only when its absolute DoG response
  *       exceeds this value.  Higher values reject low-contrast
