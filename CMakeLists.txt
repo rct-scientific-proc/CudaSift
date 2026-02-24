@@ -85,8 +85,20 @@ install(TARGETS cusift
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
+install(TARGETS cusift_demo
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
 install(FILES cusift.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY test/
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/cusift/test
+  FILES_MATCHING
+    PATTERN "*.png"
+    PATTERN "*.py"
+    PATTERN "*.cpp"
 )
 
 # ── CPack ────────────────────────────────────────────────
