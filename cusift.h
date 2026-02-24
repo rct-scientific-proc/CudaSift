@@ -127,7 +127,30 @@ CUSIFT_API void DeleteSiftData(SiftData* sift_data);
  */
 CUSIFT_API void SaveSiftData(const char* filename, const SiftData* sift_data);
 
+/**
+ * @brief Extract Sift features from two images and match them. This is a convenience function that combines ExtractSiftFromImage() and MatchSiftData() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
+ * 
+ * @param image1 Pointer to the first input image.
+ * @param image2 Pointer to the second input image.
+ * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
+ * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+ * @param extract_options ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+ */
+CUSIFT_API void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, const ExtractSiftOptions_t* extract_options);
 
+/**
+ * @brief Extract Sift features from two images, match them, and find a homography transformation between the matched features. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), and FindHomography() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
+ * 
+ * @param image1 Pointer to the first input image.
+ * @param image2 Pointer to the second input image.
+ * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
+ * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+ * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
+ * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
+ * @param extract_options ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+ * @param homography_options HomographyOptions_t structure containing parameters for homography computation.
+ */
+CUSIFT_API void ExtractAndMatchAndFindHomography(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, float* homography, int* num_matches, const ExtractSiftOptions_t* extract_options, const FindHomographyOptions_t* homography_options);
 
 
 #ifdef __cplusplus
