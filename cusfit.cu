@@ -60,6 +60,7 @@ void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const Extra
         options->init_blur_,
         options->thresh_,
         options->lowest_scale_,
+        options->edge_thresh_,
         tempMemory.get());
 }
 
@@ -169,7 +170,8 @@ void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2, SiftData*
     CudaImage_Download(cuda_image1.get());
     ExtractSift(sift_data1, cuda_image1.get(), octaves,
                 extract_options->init_blur_, extract_options->thresh_,
-                extract_options->lowest_scale_, tempMemory.get());
+                extract_options->lowest_scale_, extract_options->edge_thresh_,
+                tempMemory.get());
 
     // Extract from image 2
     InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
@@ -178,7 +180,8 @@ void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2, SiftData*
     CudaImage_Download(cuda_image2.get());
     ExtractSift(sift_data2, cuda_image2.get(), octaves,
                 extract_options->init_blur_, extract_options->thresh_,
-                extract_options->lowest_scale_, tempMemory.get());
+                extract_options->lowest_scale_, extract_options->edge_thresh_,
+                tempMemory.get());
 
     // Match
     MatchSiftData_private(sift_data1, sift_data2);

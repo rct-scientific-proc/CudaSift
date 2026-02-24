@@ -13,7 +13,7 @@ extern "C" {
 void InitCuda(int devNum);
 float *AllocSiftTempMemory(int width, int height, int numOctaves);
 void FreeSiftTempMemory(float *memoryTmp);
-void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initBlur, float thresh, float lowestScale, float *tempMemory);
+void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initBlur, float thresh, float lowestScale, float edgeLimit, float *tempMemory);
 void InitSiftData(SiftData *data, int num, bool host, bool dev);
 void FreeSiftData(SiftData *data);
 double MatchSiftData_private(SiftData *data1, SiftData *data2);
