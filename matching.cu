@@ -1,5 +1,6 @@
 #include "cudaSift.h"
 #include "cudautils.h"
+#include "RAII_Gaurds.hpp"
 
 //================= Device matching functions =====================//
 
@@ -364,28 +365,35 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     if (numPts < 8)
         return 0.0f;
     int numPtsUp = iDivUp(numPts, 16) * 16;
-    float *d_coord, *d_homo;
-    int *d_randPts, *h_randPts;
     int randSize = 4 * sizeof(int) * numLoops;
     int szFl = sizeof(float);
     int szPt = sizeof(SiftPoint);
-    safeCall(cudaMalloc((void **)&d_coord, 4 * sizeof(float) * numPtsUp));
-    safeCall(cudaMalloc((void **)&d_randPts, randSize));
-    safeCall(cudaMalloc((void **)&d_homo, 8 * sizeof(float) * numLoops));
-    h_randPts = (int *)malloc(randSize);
-    float *h_scores = (float *)malloc(sizeof(float) * numPtsUp);
-    float *h_ambiguities = (float *)malloc(sizeof(float) * numPtsUp);
+    DevicePtrGuard<float> d_coord_guard;
+    DevicePtrGuard<int>   d_randPts_guard;
+    DevicePtrGuard<float> d_homo_guard;
+    safeCall(cudaMalloc((void **)&d_coord_guard.getRef(), 4 * sizeof(float) * numPtsUp));
+    safeCall(cudaMalloc((void **)&d_randPts_guard.getRef(), randSize));
+    safeCall(cudaMalloc((void **)&d_homo_guard.getRef(), 8 * sizeof(float) * numLoops));
+    float *d_coord = d_coord_guard.get();
+    int   *d_randPts = d_randPts_guard.get();
+    float *d_homo = d_homo_guard.get();
+    HostPtrGuard<int>   h_randPts_guard((int *)malloc(randSize));
+    HostPtrGuard<float> h_scores_guard((float *)malloc(sizeof(float) * numPtsUp));
+    HostPtrGuard<float> h_ambiguities_guard((float *)malloc(sizeof(float) * numPtsUp));
+    int *h_randPts = h_randPts_guard.get();
+    float *h_scores = h_scores_guard.get();
+    float *h_ambiguities = h_ambiguities_guard.get();
     safeCall(cudaMemcpy2D(h_scores, szFl, &d_sift[0].score, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
     safeCall(cudaMemcpy2D(h_ambiguities, szFl, &d_sift[0].ambiguity, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
-    int *validPts = (int *)malloc(sizeof(int) * numPts);
+    HostPtrGuard<int> validPts_guard((int *)malloc(sizeof(int) * numPts));
+    int *validPts = validPts_guard.get();
     int numValid = 0;
     for (int i = 0; i < numPts; i++)
     {
         if (h_scores[i] > minScore && h_ambiguities[i] < maxAmbiguity)
             validPts[numValid++] = i;
     }
-    free(h_scores);
-    free(h_ambiguities);
+    // h_scores and h_ambiguities freed here automatically via guards
     if (numValid >= 8)
     {
         for (int i = 0; i < numLoops; i++)
@@ -429,11 +437,7 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
         *numMatches = maxCount;
         safeCall(cudaMemcpy2D(homography, szFl, &d_homo[maxIndex], sizeof(float) * numLoops, szFl, 8, cudaMemcpyDeviceToHost));
     }
-    free(validPts);
-    free(h_randPts);
-    safeCall(cudaFree(d_homo));
-    safeCall(cudaFree(d_randPts));
-    safeCall(cudaFree(d_coord));
+    // All device and host pointers are freed automatically by RAII guards
     return 0.0;
 }
 

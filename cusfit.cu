@@ -3,6 +3,7 @@
 #include "cudaImage.h"
 #include "cudaSift.h"
 #include "geomFuncs.h"
+#include "RAII_Gaurds.hpp"
 
 #include <cuda_runtime.h>
 #include <iostream>
@@ -25,14 +26,12 @@ void InitializeCudaSift()
 
 void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const ExtractSiftOptions_t* options)
 {
-    float* tempMemory = nullptr;
-    CudaImage cuda_image;
+    CudaImageGuard cuda_image;
 
-    CudaImage_init(&cuda_image);
     InitSiftData(sift_data, options->max_keypoints_, true, true);
 
     CudaImage_Allocate(
-        &cuda_image,
+        cuda_image.get(),
         image->width_,
         image->height_,
         p_iAlignUp(image->width_, 128),
@@ -40,7 +39,7 @@ void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const Extra
         nullptr,
         image->host_img_);
     
-    CudaImage_Download(&cuda_image);
+    CudaImage_Download(cuda_image.get());
 
     // Get the smallest dimension of the image to determine the maximum number of octaves
     int minDim = std::min(image->width_, image->height_);
@@ -52,16 +51,16 @@ void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const Extra
         std::cerr << "Warning: Requested number of octaves (" << options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
     }
 
-    tempMemory = AllocSiftTempMemory(image->width_, image->height_, octaves);
+    SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(image->width_, image->height_, octaves));
 
     ExtractSift(
         sift_data,
-        &cuda_image,
+        cuda_image.get(),
         octaves,
         options->init_blur_,
         options->thresh_,
         options->lowest_scale_,
-        tempMemory);
+        tempMemory.get());
 }
 
 void MatchSiftData(SiftData* data1, SiftData* data2)

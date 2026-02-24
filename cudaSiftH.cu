@@ -13,6 +13,7 @@
 #include "cudaSift.h"
 #include "cudaSiftD.h"
 #include "cudaSiftH.h"
+#include "RAII_Gaurds.hpp"
 
 #include "cudaSiftD.cu"
 
@@ -88,29 +89,28 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     }
     float *memoryTmp = tempMemory;
     size += sizeTmp;
+    DevicePtrGuard<float> memoryTmpGuard; // only owns memory if we allocate it
     if (!tempMemory)
     {
         size_t pitch;
-        safeCall(cudaMallocPitch((void **)&memoryTmp, &pitch, (size_t)4096, (size + 4095) / 4096 * sizeof(float)));
+        safeCall(cudaMallocPitch((void **)&memoryTmpGuard.getRef(), &pitch, (size_t)4096, (size + 4095) / 4096 * sizeof(float)));
+        memoryTmp = memoryTmpGuard.get();
     }
     float *memorySub = memoryTmp + sizeTmp;
 
-    CudaImage lowImg;
-    CudaImage_init(&lowImg);
-    CudaImage_Allocate(&lowImg, width, height, iAlignUp(width, 128), false, memorySub, NULL);
+    CudaImageGuard lowImgGuard;
+    CudaImage_Allocate(lowImgGuard.get(), width, height, iAlignUp(width, 128), false, memorySub, NULL);
     float kernel[8 * 12 * 16];
     PrepareLaplaceKernels(numOctaves, 0.0f, kernel);
     safeCall(cudaMemcpyToSymbolAsync(d_LaplaceKernel, kernel, 8 * 12 * 16 * sizeof(float)));
-    LowPass(&lowImg, img, max(initBlur, 0.001f));
-    ExtractSiftLoop(siftData, &lowImg, numOctaves, 0.0f, thresh, lowestScale, 1.0f, memoryTmp, memorySub + height * iAlignUp(width, 128));
+    LowPass(lowImgGuard.get(), img, max(initBlur, 0.001f));
+    ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, 0.0f, thresh, lowestScale, 1.0f, memoryTmp, memorySub + height * iAlignUp(width, 128));
     safeCall(cudaMemcpy(&siftData->numPts, &d_PointCounterAddr[2 * numOctaves], sizeof(int), cudaMemcpyDeviceToHost));
     siftData->numPts = (siftData->numPts < siftData->maxPts ? siftData->numPts : siftData->maxPts);
 
-    if (!tempMemory)
-        safeCall(cudaFree(memoryTmp));
     if (siftData->h_data)
         safeCall(cudaMemcpy(siftData->h_data, siftData->d_data, sizeof(SiftPoint) * siftData->numPts, cudaMemcpyDeviceToHost));
-    CudaImage_destroy(&lowImg);
+    // lowImgGuard and memoryTmpGuard are cleaned up automatically
 }
 
 // Keep
@@ -120,14 +120,12 @@ int ExtractSiftLoop(SiftData *siftData, CudaImage *img, int numOctaves, float in
     int h = img->height;
     if (numOctaves > 1)
     {
-        CudaImage subImg;
-        CudaImage_init(&subImg);
+        CudaImageGuard subImgGuard;
         int p = iAlignUp(w / 2, 128);
-        CudaImage_Allocate(&subImg, w / 2, h / 2, p, false, memorySub, NULL);
-        ScaleDown(&subImg, img, 0.5f);
+        CudaImage_Allocate(subImgGuard.get(), w / 2, h / 2, p, false, memorySub, NULL);
+        ScaleDown(subImgGuard.get(), img, 0.5f);
         float totInitBlur = (float)sqrt(initBlur * initBlur + 0.5f * 0.5f) / 2.0f;
-        ExtractSiftLoop(siftData, &subImg, numOctaves - 1, totInitBlur, thresh, lowestScale, subsampling * 2.0f, memoryTmp, memorySub + (h / 2) * p);
-        CudaImage_destroy(&subImg);
+        ExtractSiftLoop(siftData, subImgGuard.get(), numOctaves - 1, totInitBlur, thresh, lowestScale, subsampling * 2.0f, memoryTmp, memorySub + (h / 2) * p);
     }
     ExtractSiftOctave(siftData, img, numOctaves, thresh, lowestScale, subsampling, memoryTmp);
     return 0;
@@ -202,6 +200,7 @@ void FreeSiftData(SiftData *data)
         free(data->h_data);
     data->numPts = 0;
     data->maxPts = 0;
+    data->h_data = NULL;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
