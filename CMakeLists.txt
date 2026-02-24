@@ -62,6 +62,11 @@ endif()
 
 # cudart is linked automatically by CMake when CUDA is a project language
 
+# ── Demo executable ──────────────────────────────────────
+add_executable(cusift_demo local/main.cpp)
+target_include_directories(cusift_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/local)
+target_link_libraries(cusift_demo PRIVATE cusift)
+
 # ── Install ──────────────────────────────────────────────
 include(GNUInstallDirs)
 

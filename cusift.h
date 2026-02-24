@@ -74,6 +74,8 @@ void FindHomography(SiftData* data, float* homography, int* num_matches, const F
 
 void DeleteSiftData(SiftData* sift_data);
 
+void SaveSiftData(const char* filename, const SiftData* sift_data);
+
 #ifdef __cplusplus
 }
 #endif

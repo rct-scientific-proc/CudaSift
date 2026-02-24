@@ -95,3 +95,54 @@ void DeleteSiftData(SiftData* sift_data)
     FreeSiftData(sift_data);
 }
 
+
+void SaveSiftData(const char* filename, const SiftData* sift_data)
+{
+    if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
+    {
+        std::cerr << "SaveSiftData: no data to save" << std::endl;
+        return;
+    }
+
+    FILE* f = fopen(filename, "w");
+    if (!f)
+    {
+        std::cerr << "SaveSiftData: could not open file " << filename << std::endl;
+        return;
+    }
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"num_keypoints\": %d,\n", sift_data->numPts);
+    fprintf(f, "  \"keypoints\": [\n");
+
+    for (int i = 0; i < sift_data->numPts; i++)
+    {
+        const SiftPoint* pt = &sift_data->h_data[i];
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"x\": %.6f,\n", pt->xpos);
+        fprintf(f, "      \"y\": %.6f,\n", pt->ypos);
+        fprintf(f, "      \"scale\": %.6f,\n", pt->scale);
+        fprintf(f, "      \"sharpness\": %.6f,\n", pt->sharpness);
+        fprintf(f, "      \"edgeness\": %.6f,\n", pt->edgeness);
+        fprintf(f, "      \"orientation\": %.6f,\n", pt->orientation);
+        fprintf(f, "      \"score\": %.6f,\n", pt->score);
+        fprintf(f, "      \"ambiguity\": %.6f,\n", pt->ambiguity);
+        fprintf(f, "      \"match\": %d,\n", pt->match);
+        fprintf(f, "      \"match_x\": %.6f,\n", pt->match_xpos);
+        fprintf(f, "      \"match_y\": %.6f,\n", pt->match_ypos);
+        fprintf(f, "      \"match_error\": %.6f,\n", pt->match_error);
+        fprintf(f, "      \"descriptor\": [");
+        for (int j = 0; j < 128; j++)
+        {
+            fprintf(f, "%.6f", pt->data[j]);
+            if (j < 127) fprintf(f, ", ");
+        }
+        fprintf(f, "]\n");
+        fprintf(f, "    }%s\n", (i < sift_data->numPts - 1) ? "," : "");
+    }
+
+    fprintf(f, "  ]\n");
+    fprintf(f, "}\n");
+    fclose(f);
+}
+
