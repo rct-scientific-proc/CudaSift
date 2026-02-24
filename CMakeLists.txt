@@ -28,8 +28,17 @@ set(LIB_C_SOURCES
 
 if(CUSIFT_BUILD_SHARED)
   add_library(cusift SHARED ${LIB_CUDA_SOURCES} ${LIB_C_SOURCES})
+  target_compile_definitions(cusift PRIVATE CUSIFT_EXPORTS)
+  # Default-hidden visibility on GCC/Clang; only CUSIFT_API symbols are exported
+  set_target_properties(cusift PROPERTIES
+    C_VISIBILITY_PRESET hidden
+    CXX_VISIBILITY_PRESET hidden
+    CUDA_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+  )
 else()
   add_library(cusift STATIC ${LIB_CUDA_SOURCES} ${LIB_C_SOURCES})
+  target_compile_definitions(cusift PUBLIC CUSIFT_STATIC)
 endif()
 
 # Public headers so consumers get the include path automatically

@@ -1,6 +1,21 @@
 #ifndef CUSIFT_H
 #define CUSIFT_H
 
+// ── Export / import macros ──────────────────────────────
+#ifdef CUSIFT_STATIC
+  #define CUSIFT_API
+#elif defined(_WIN32)
+  #ifdef CUSIFT_EXPORTS
+    #define CUSIFT_API __declspec(dllexport)
+  #else
+    #define CUSIFT_API __declspec(dllimport)
+  #endif
+#elif __GNUC__ >= 4
+  #define CUSIFT_API __attribute__((visibility("default")))
+#else
+  #define CUSIFT_API
+#endif
+
 // C linkage for easier interoperability with C and other languages
 #ifdef __cplusplus
 extern "C" {
@@ -64,17 +79,56 @@ typedef struct
     float improve_thresh_;
 } FindHomographyOptions_t;
 
-void InitializeCudaSift();
+/**
+ * @brief Initialize the CUDA SIFT library. Must be called before any other functions. All it does it find a valid device.
+ * 
+ */
+CUSIFT_API void InitializeCudaSift();
 
-void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const ExtractSiftOptions_t* options);
+/**
+ * @brief Extract SIFT features from an image. The caller is responsible for freeing the SiftData using DeleteSiftData() when done.
+ * 
+ * @param image Pointer to the input image.
+ * @param sift_data Pointer to the SiftData structure where the extracted features will be stored.
+ * @param options Pointer to the ExtractSiftOptions_t structure containing extraction parameters.
+ */
+CUSIFT_API void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const ExtractSiftOptions_t* options);
 
-void MatchSiftData(SiftData* data1, SiftData* data2);
+/**
+ * @brief Match SIFT features between two SiftData structures. The match results are stored in the 'match', 'match_xpos', 'match_ypos', and 'match_error' fields of the SiftPoint structures in data1. The caller is responsible for ensuring that data1 and data2 are properly initialized and contain valid SIFT features before calling this function.
+ * 
+ * @param data1 Pointer to the first SiftData structure.
+ * @param data2 Pointer to the second SiftData structure.
+ */
+CUSIFT_API void MatchSiftData(SiftData* data1, SiftData* data2);
 
-void FindHomography(SiftData* data, float* homography, int* num_matches, const FindHomographyOptions_t* options);
+/**
+ * @brief Find a homography transformation between matched SIFT features in the given SiftData structure. The homography is returned as a 3x3 matrix in row-major order in the 'homography' output parameter. The number of matches used to compute the homography is returned in the 'num_matches' output parameter. The caller is responsible for ensuring that the SiftData structure contains valid matched SIFT features before calling this function.
+ * 
+ * @param data Pointer to the SiftData structure containing matched SIFT features.
+ * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
+ * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
+ * @param options Pointer to the FindHomographyOptions_t structure containing homography computation parameters.
+ */
+CUSIFT_API void FindHomography(SiftData* data, float* homography, int* num_matches, const FindHomographyOptions_t* options);
 
-void DeleteSiftData(SiftData* sift_data);
+/**
+ * @brief Delete a SiftData structure and free all associated resources. After calling this function, the SiftData pointer should not be used again unless it is re-initialized. The caller is responsible for ensuring that the SiftData structure was properly initialized and contains valid data before calling this function.
+ * 
+ * @param sift_data Pointer to the SiftData structure to be deleted.
+ */
+CUSIFT_API void DeleteSiftData(SiftData* sift_data);
 
-void SaveSiftData(const char* filename, const SiftData* sift_data);
+/**
+ * @brief Save SIFT features from a SiftData structure to a json file.
+ * 
+ * @param filename Pointer to the name of the file where the SIFT features will be saved.
+ * @param sift_data Pointer to the SiftData structure containing the SIFT features to be saved.
+ */
+CUSIFT_API void SaveSiftData(const char* filename, const SiftData* sift_data);
+
+
+
 
 #ifdef __cplusplus
 }
