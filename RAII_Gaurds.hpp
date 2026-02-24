@@ -90,6 +90,26 @@ public:
     const T* get() const { return host_ptr_; }
 };
 
+// ====== CUDA Texture Object RAII Guard ======
+class TextureObjectGuard
+{
+private:
+    cudaTextureObject_t tex_;
+public:
+    TextureObjectGuard() : tex_(0) {}
+    explicit TextureObjectGuard(cudaTextureObject_t tex) : tex_(tex) {}
+    ~TextureObjectGuard() { if (tex_) cudaDestroyTextureObject(tex_); }
+
+    TextureObjectGuard(const TextureObjectGuard&) = delete;
+    TextureObjectGuard& operator=(const TextureObjectGuard&) = delete;
+
+    void reset(cudaTextureObject_t tex) { if (tex_) cudaDestroyTextureObject(tex_); tex_ = tex; }
+    cudaTextureObject_t get() const { return tex_; }
+
+    // Allow use to free the texture object manually if needed
+    void free() { if (tex_) { cudaDestroyTextureObject(tex_); tex_ = 0; } }
+};
+
 
 
 #endif /* RAII_GAURDS_HPP */

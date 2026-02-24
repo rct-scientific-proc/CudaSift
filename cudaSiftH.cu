@@ -165,13 +165,14 @@ void ExtractSiftOctave(SiftData *siftData, CudaImage *img, int octave, float thr
     // Create texture object
     cudaTextureObject_t texObj = 0;
     cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL);
+    TextureObjectGuard texGuard(texObj);
 
     LaplaceMulti(texObj, img, diffImg, octave);
     FindPointsMulti(diffImg, siftData, thresh, 10.0f, 1.0f / NUM_SCALES, lowestScale / subsampling, subsampling, octave);
     ComputeOrientations(texObj, img, siftData, octave);
     ExtractSiftDescriptors(texObj, siftData, subsampling, octave);
 
-    safeCall(cudaDestroyTextureObject(texObj));
+    texGuard.free(); // free texture object before freeing memory
     for (int i = 0; i < nd - 1; i++)
         CudaImage_destroy(&diffImg[i]);
 }
