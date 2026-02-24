@@ -112,7 +112,7 @@ __global__ void FindMaxCorr10(SiftPoint *sift1, SiftPoint *sift2, int numPts1, i
     }
     __syncthreads();
 
-    if (ty == 0)
+    if (ty == 0 && bp1 + tx < numPts1)
     {
         float max_score = scores1[tx];
         float sec_score = scores2[tx];
@@ -134,8 +134,8 @@ __global__ void FindMaxCorr10(SiftPoint *sift1, SiftPoint *sift2, int numPts1, i
             }
         sift1[bp1 + tx].score = max_score;
         sift1[bp1 + tx].match = index;
-        sift1[bp1 + tx].match_xpos = sift2[index].xpos;
-        sift1[bp1 + tx].match_ypos = sift2[index].ypos;
+        sift1[bp1 + tx].match_xpos = index >= 0 ? sift2[index].xpos : 0.0f;
+        sift1[bp1 + tx].match_ypos = index >= 0 ? sift2[index].ypos : 0.0f;
         sift1[bp1 + tx].ambiguity = sec_score / (max_score + 1e-6f);
     }
 }
