@@ -48,8 +48,9 @@ void CudaImage_Allocate(CudaImage *img, int w, int h, int p, bool host, float *d
     img->t_data = NULL;
     if (devmem == NULL)
     {
-        safeCall(cudaMallocPitch((void **)&img->d_data, (size_t *)&img->pitch, (size_t)(sizeof(float) * img->width), (size_t)img->height));
-        img->pitch /= sizeof(float);
+        size_t pitch;
+        safeCall(cudaMallocPitch((void **)&img->d_data, &pitch, (size_t)(sizeof(float) * img->width), (size_t)img->height));
+        img->pitch = (int)(pitch / sizeof(float));
         if (img->d_data == NULL)
             printf("Failed to allocate device data\n");
         img->d_internalAlloc = true;
