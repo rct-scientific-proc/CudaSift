@@ -127,6 +127,16 @@ def load_cusift(dll_path: str | Path) -> ctypes.CDLL:
     lib.SaveSiftData.restype = None
     lib.SaveSiftData.argtypes = [c_char_p, POINTER(SiftData)]
 
+    lib.CusiftHadError.restype = c_int
+    lib.CusiftHadError.argtypes = []
+
+    lib.CusiftGetLastErrorString.restype = None
+    lib.CusiftGetLastErrorString.argtypes = [
+        POINTER(c_int),
+        ctypes.c_char * 256,
+        ctypes.c_char * 256,
+    ]
+
     return lib
 
 

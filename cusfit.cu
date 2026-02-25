@@ -16,104 +16,202 @@
 
 static int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
 
-static bool Invert3x3(const float* M, float* out);
-static inline float SampleBilinear(const float* img, int w, int h, float x, float y);
+static bool Invert3x3(const float *M, float *out);
+static inline float SampleBilinear(const float *img, int w, int h, float x, float y);
 static __global__ void WarpDualKernel(
-    const float* __restrict__ src1, float* __restrict__ dst1, int src1W, int src1H, int src1Pitch,
-    const float* __restrict__ src2, float* __restrict__ dst2, int src2W, int src2H, int src2Pitch,
+    const float *__restrict__ src1, float *__restrict__ dst1, int src1W, int src1H, int src1Pitch,
+    const float *__restrict__ src2, float *__restrict__ dst2, int src2W, int src2H, int src2Pitch,
     int dstW, int dstH, int dstPitch, float originU, float originV,
     float h00, float h01, float h02, float h10, float h11, float h12, float h20, float h21, float h22);
 
+// ── Thread-local error storage ──────────────────────────
+static thread_local int s_lastErrorLine = 0;
+static thread_local char s_lastErrorFile[256] = {};
+static thread_local char s_lastErrorMessage[256] = {};
+static thread_local bool s_hadError = false;
+
+static void cusift_clear_error()
+{
+    s_hadError = false;
+    s_lastErrorLine = 0;
+    s_lastErrorFile[0] = '\0';
+    s_lastErrorMessage[0] = '\0';
+}
+
+// Parse file/line from __safeCall message format:
+//   "CUDA error in file 'FILE' in line LINE : MSG"
+static void cusift_store_error_from_exception(const char *what)
+{
+    s_hadError = true;
+
+    const char *file_start = strstr(what, "in file '");
+    const char *line_start = strstr(what, "in line ");
+
+    if (file_start && line_start)
+    {
+        file_start += 9; // skip "in file '"
+        const char *file_end = strchr(file_start, '\'');
+        if (file_end)
+        {
+            size_t len = (size_t)(file_end - file_start);
+            if (len > 255)
+                len = 255;
+            memcpy(s_lastErrorFile, file_start, len);
+            s_lastErrorFile[len] = '\0';
+        }
+
+        line_start += 8; // skip "in line "
+        s_lastErrorLine = atoi(line_start);
+    }
+    else
+    {
+        s_lastErrorFile[0] = '\0';
+        s_lastErrorLine = 0;
+    }
+
+    strncpy(s_lastErrorMessage, what, 255);
+    s_lastErrorMessage[255] = '\0';
+}
+
+// Wrap an API body: clear error state, run fn(), catch and store any exception.
+template <typename F>
+static void cusift_api_guard(F &&fn)
+{
+    cusift_clear_error();
+    try
+    {
+        fn();
+    }
+    catch (const std::exception &e)
+    {
+        cusift_store_error_from_exception(e.what());
+    }
+    catch (...)
+    {
+        s_hadError = true;
+        s_lastErrorLine = 0;
+        s_lastErrorFile[0] = '\0';
+        strncpy(s_lastErrorMessage, "Unknown exception", 255);
+        s_lastErrorMessage[255] = '\0';
+    }
+}
+
+void CusiftGetLastErrorString(int *line_number, char filename[256], char error_message[256])
+{
+    if (line_number)
+        *line_number = s_lastErrorLine;
+    if (filename)
+    {
+        strncpy(filename, s_lastErrorFile, 255);
+        filename[255] = '\0';
+    }
+    if (error_message)
+    {
+        strncpy(error_message, s_lastErrorMessage, 255);
+        error_message[255] = '\0';
+    }
+}
+
+int CusiftHadError()
+{
+    return s_hadError ? 1 : 0;
+}
 
 void InitializeCudaSift()
 {
-    int nDevices;
-    cudaGetDeviceCount(&nDevices);
-    if (!nDevices)
-    {
-        std::cerr << "No CUDA devices available" << std::endl;
-        return;
-    }
-    int devNum = std::min(nDevices - 1, 0);
-    safeCall(cudaSetDevice(devNum));
+    cusift_api_guard([&]()
+                     {
+        int nDevices;
+        cudaGetDeviceCount(&nDevices);
+        if (!nDevices)
+        {
+            std::cerr << "No CUDA devices available" << std::endl;
+            return;
+        }
+        int devNum = std::min(nDevices - 1, 0);
+        safeCall(cudaSetDevice(devNum)); });
 }
 
-void ExtractSiftFromImage(const Image_t* image, SiftData* sift_data, const ExtractSiftOptions_t* options)
+void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options)
 {
-    CudaImageGuard cuda_image;
+    cusift_api_guard([&]()
+                     {
+        CudaImageGuard cuda_image;
 
-    InitSiftData(sift_data, options->max_keypoints_, true, true);
+        InitSiftData(sift_data, options->max_keypoints_, true, true);
 
-    CudaImage_Allocate(
-        cuda_image.get(),
-        image->width_,
-        image->height_,
-        p_iAlignUp(image->width_, 128),
-        false,
-        nullptr,
-        image->host_img_);
-    
-    CudaImage_Download(cuda_image.get());
-    //CudaImage_Normalize(cuda_image.get());
+        CudaImage_Allocate(
+            cuda_image.get(),
+            image->width_,
+            image->height_,
+            p_iAlignUp(image->width_, 128),
+            false,
+            nullptr,
+            image->host_img_);
 
-    // Get the smallest dimension of the image to determine the maximum number of octaves
-    int minDim = std::min(image->width_, image->height_);
-    int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3; // Subtract 3 to ensure we have enough pixels in the smallest octave
-    int octaves = std::min(options->num_octaves_, maxOctaves);
-    if (options->num_octaves_ > maxOctaves)
-    {
-        // Quitly reduce the number of octaves to the maximum possible based on the image size
-        std::cerr << "Warning: Requested number of octaves (" << options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-    }
+        CudaImage_Download(cuda_image.get());
+        //CudaImage_Normalize(cuda_image.get());
 
-    SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(image->width_, image->height_, octaves));
+        // Get the smallest dimension of the image to determine the maximum number of octaves
+        int minDim = std::min(image->width_, image->height_);
+        int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
+        int octaves = std::min(options->num_octaves_, maxOctaves);
+        if (options->num_octaves_ > maxOctaves)
+        {
+            std::cerr << "Warning: Requested number of octaves (" << options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
+        }
 
-    ExtractSift(
-        sift_data,
-        cuda_image.get(),
-        octaves,
-        options->init_blur_,
-        options->thresh_,
-        options->lowest_scale_,
-        options->edge_thresh_,
-        tempMemory.get());
+        SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(image->width_, image->height_, octaves));
+
+        ExtractSift(
+            sift_data,
+            cuda_image.get(),
+            octaves,
+            options->init_blur_,
+            options->thresh_,
+            options->lowest_scale_,
+            options->edge_thresh_,
+            tempMemory.get()); });
 }
 
-void MatchSiftData(SiftData* data1, SiftData* data2)
+void MatchSiftData(SiftData *data1, SiftData *data2)
 {
-    MatchSiftData_private(data1, data2);
+    cusift_api_guard([&]()
+                     { MatchSiftData_private(data1, data2); });
 }
 
-void FindHomography(SiftData* data, float* homography, int* num_matches, const FindHomographyOptions_t* options)
+void FindHomography(SiftData *data, float *homography, int *num_matches, const FindHomographyOptions_t *options)
 {
-    FindHomography_private(
-        data,
-        homography,
-        num_matches,
-        options->num_loops_,
-        options->min_score_,
-        options->max_ambiguity_,
-        options->thresh_,
-        options->seed_);
-    
-    ImproveHomography(
-        data,
-        homography,
-        options->improve_num_loops_,
-        options->improve_min_score_,
-        options->improve_max_ambiguity_,
-        options->improve_thresh_);
+    cusift_api_guard([&]()
+                     {
+        FindHomography_private(
+            data,
+            homography,
+            num_matches,
+            options->num_loops_,
+            options->min_score_,
+            options->max_ambiguity_,
+            options->thresh_,
+            options->seed_);
+
+        ImproveHomography(
+            data,
+            homography,
+            options->improve_num_loops_,
+            options->improve_min_score_,
+            options->improve_max_ambiguity_,
+            options->improve_thresh_); });
 }
 
-
-void DeleteSiftData(SiftData* sift_data)
+void DeleteSiftData(SiftData *sift_data)
 {
-    // Call FreeSiftData to free device memory
-    FreeSiftData(sift_data);
+    // FreeSiftData uses cudaFree directly (not safeCall), so it is
+    // destructor-safe and won't throw.  We still wrap for consistency.
+    cusift_api_guard([&]()
+                     { FreeSiftData(sift_data); });
 }
 
-
-void SaveSiftData(const char* filename, const SiftData* sift_data)
+void SaveSiftData(const char *filename, const SiftData *sift_data)
 {
     if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
     {
@@ -121,7 +219,7 @@ void SaveSiftData(const char* filename, const SiftData* sift_data)
         return;
     }
 
-    FILE* f = fopen(filename, "w");
+    FILE *f = fopen(filename, "w");
     if (!f)
     {
         std::cerr << "SaveSiftData: could not open file " << filename << std::endl;
@@ -134,7 +232,7 @@ void SaveSiftData(const char* filename, const SiftData* sift_data)
 
     for (int i = 0; i < sift_data->numPts; i++)
     {
-        const SiftPoint* pt = &sift_data->h_data[i];
+        const SiftPoint *pt = &sift_data->h_data[i];
         fprintf(f, "    {\n");
         fprintf(f, "      \"x\": %.6f,\n", pt->xpos);
         fprintf(f, "      \"y\": %.6f,\n", pt->ypos);
@@ -152,7 +250,8 @@ void SaveSiftData(const char* filename, const SiftData* sift_data)
         for (int j = 0; j < 128; j++)
         {
             fprintf(f, "%.6f", pt->data[j]);
-            if (j < 127) fprintf(f, ", ");
+            if (j < 127)
+                fprintf(f, ", ");
         }
         fprintf(f, "]\n");
         fprintf(f, "    }%s\n", (i < sift_data->numPts - 1) ? "," : "");
@@ -163,79 +262,117 @@ void SaveSiftData(const char* filename, const SiftData* sift_data)
     fclose(f);
 }
 
-void ExtractAndMatchSift(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, const ExtractSiftOptions_t* extract_options)
+void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options)
 {
-    int maxW = std::max(image1->width_, image2->width_);
-    int maxH = std::max(image1->height_, image2->height_);
+    cusift_api_guard([&]()
+                     {
+        int maxW = std::max(image1->width_, image2->width_);
+        int maxH = std::max(image1->height_, image2->height_);
 
-    CudaImageGuard cuda_image1;
-    CudaImageGuard cuda_image2;
+        CudaImageGuard cuda_image1;
+        CudaImageGuard cuda_image2;
 
-    // Clamp octaves to what the smallest image dimension supports
-    int minDim = std::min({image1->width_, image1->height_, image2->width_, image2->height_});
-    int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
-    int octaves = std::min(extract_options->num_octaves_, maxOctaves);
+        // Clamp octaves to what the smallest image dimension supports
+        int minDim = std::min({image1->width_, image1->height_, image2->width_, image2->height_});
+        int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
+        int octaves = std::min(extract_options->num_octaves_, maxOctaves);
 
-    // Only allocate a single temporary buffer for both images since they won't be processed at the same time
-    SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(maxW, maxH, octaves));
+        // Only allocate a single temporary buffer for both images since they won't be processed at the same time
+        SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(maxW, maxH, octaves));
 
-    // Extract from image 1
-    InitSiftData(sift_data1, extract_options->max_keypoints_, true, true);
-    CudaImage_Allocate(cuda_image1.get(), image1->width_, image1->height_,
-                       p_iAlignUp(image1->width_, 128), false, nullptr, image1->host_img_);
-    CudaImage_Download(cuda_image1.get());
-    //CudaImage_Normalize(cuda_image1.get());
-    ExtractSift(sift_data1, cuda_image1.get(), octaves,
-                extract_options->init_blur_, extract_options->thresh_,
-                extract_options->lowest_scale_, extract_options->edge_thresh_,
-                tempMemory.get());
+        // Extract from image 1
+        InitSiftData(sift_data1, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image1.get(), image1->width_, image1->height_,
+                           p_iAlignUp(image1->width_, 128), false, nullptr, image1->host_img_);
+        CudaImage_Download(cuda_image1.get());
+        //CudaImage_Normalize(cuda_image1.get());
+        ExtractSift(sift_data1, cuda_image1.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
 
-    // Extract from image 2
-    InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
-    CudaImage_Allocate(cuda_image2.get(), image2->width_, image2->height_,
-                       p_iAlignUp(image2->width_, 128), false, nullptr, image2->host_img_);
-    CudaImage_Download(cuda_image2.get());
-    //CudaImage_Normalize(cuda_image2.get());
-    ExtractSift(sift_data2, cuda_image2.get(), octaves,
-                extract_options->init_blur_, extract_options->thresh_,
-                extract_options->lowest_scale_, extract_options->edge_thresh_,
-                tempMemory.get());
+        // Extract from image 2
+        InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image2.get(), image2->width_, image2->height_,
+                           p_iAlignUp(image2->width_, 128), false, nullptr, image2->host_img_);
+        CudaImage_Download(cuda_image2.get());
+        //CudaImage_Normalize(cuda_image2.get());
+        ExtractSift(sift_data2, cuda_image2.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
 
-    // Match
-    MatchSiftData_private(sift_data1, sift_data2);
+        // Match
+        MatchSiftData_private(sift_data1, sift_data2); });
 }
 
-void ExtractAndMatchAndFindHomography(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, float* homography, int* num_matches, const ExtractSiftOptions_t* extract_options, const FindHomographyOptions_t* homography_options)
+void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options)
 {
-    ExtractAndMatchSift(image1, image2, sift_data1, sift_data2, extract_options);
+    cusift_api_guard([&]()
+                     {
+        int maxW = std::max(image1->width_, image2->width_);
+        int maxH = std::max(image1->height_, image2->height_);
 
-    FindHomography_private(
-        sift_data1, homography, num_matches,
-        homography_options->num_loops_,
-        homography_options->min_score_,
-        homography_options->max_ambiguity_,
-        homography_options->thresh_,
-        homography_options->seed_);
+        CudaImageGuard cuda_image1;
+        CudaImageGuard cuda_image2;
 
-    ImproveHomography(
-        sift_data1, homography,
-        homography_options->improve_num_loops_,
-        homography_options->improve_min_score_,
-        homography_options->improve_max_ambiguity_,
-        homography_options->improve_thresh_);
+        // Clamp octaves to what the smallest image dimension supports
+        int minDim = std::min({image1->width_, image1->height_, image2->width_, image2->height_});
+        int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
+        int octaves = std::min(extract_options->num_octaves_, maxOctaves);
+
+        // Only allocate a single temporary buffer for both images since they won't be processed at the same time
+        SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(maxW, maxH, octaves));
+
+        // Extract from image 1
+        InitSiftData(sift_data1, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image1.get(), image1->width_, image1->height_,
+                           p_iAlignUp(image1->width_, 128), false, nullptr, image1->host_img_);
+        CudaImage_Download(cuda_image1.get());
+        //CudaImage_Normalize(cuda_image1.get());
+        ExtractSift(sift_data1, cuda_image1.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
+
+        // Extract from image 2
+        InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image2.get(), image2->width_, image2->height_,
+                           p_iAlignUp(image2->width_, 128), false, nullptr, image2->host_img_);
+        CudaImage_Download(cuda_image2.get());
+        //CudaImage_Normalize(cuda_image2.get());
+        ExtractSift(sift_data2, cuda_image2.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
+
+        // Match
+        MatchSiftData_private(sift_data1, sift_data2);
+
+        FindHomography_private(
+            sift_data1, homography, num_matches,
+            homography_options->num_loops_,
+            homography_options->min_score_,
+            homography_options->max_ambiguity_,
+            homography_options->thresh_,
+            homography_options->seed_);
+
+        ImproveHomography(
+            sift_data1, homography,
+            homography_options->improve_num_loops_,
+            homography_options->improve_min_score_,
+            homography_options->improve_max_ambiguity_,
+            homography_options->improve_thresh_); });
 }
-
 
 // ── Helper: 3x3 matrix inverse (row-major) ──────────────
-bool Invert3x3(const float* M, float* out)
+bool Invert3x3(const float *M, float *out)
 {
     float a = M[0], b = M[1], c = M[2];
     float d = M[3], e = M[4], f = M[5];
     float g = M[6], h = M[7], i = M[8];
 
-    float det = a * (e * i - f * h)
-              - b * (d * i - f * g)
-              + c * (d * h - e * g);
+    float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
     if (fabsf(det) < 1e-12f)
         return false;
 
@@ -253,7 +390,7 @@ bool Invert3x3(const float* M, float* out)
 }
 
 // ── Bilinear sample (CPU) ───────────────────────────────
-inline float SampleBilinear(const float* img, int w, int h, float x, float y)
+inline float SampleBilinear(const float *img, int w, int h, float x, float y)
 {
     if (x < 0.0f || x >= (float)(w - 1) || y < 0.0f || y >= (float)(h - 1))
         return 0.0f;
@@ -275,10 +412,7 @@ inline float SampleBilinear(const float* img, int w, int h, float x, float y)
     float v01 = img[y1 * w + x0];
     float v11 = img[y1 * w + x1];
 
-    return (1.0f - fx) * (1.0f - fy) * v00
-         + fx          * (1.0f - fy) * v10
-         + (1.0f - fx) * fy          * v01
-         + fx          * fy          * v11;
+    return (1.0f - fx) * (1.0f - fy) * v00 + fx * (1.0f - fy) * v10 + (1.0f - fx) * fy * v01 + fx * fy * v11;
 }
 
 // ── GPU kernel ──────────────────────────────────────────
@@ -288,8 +422,8 @@ inline float SampleBilinear(const float* img, int w, int h, float x, float y)
 // srcPitch / dstPitch are row strides in floats (may differ from width
 // when the allocation is pitch-aligned).
 __global__ void WarpDualKernel(
-    const float* __restrict__ src1, float* __restrict__ dst1, int src1W, int src1H, int src1Pitch,
-    const float* __restrict__ src2, float* __restrict__ dst2, int src2W, int src2H, int src2Pitch,
+    const float *__restrict__ src1, float *__restrict__ dst1, int src1W, int src1H, int src1Pitch,
+    const float *__restrict__ src2, float *__restrict__ dst2, int src2W, int src2H, int src2Pitch,
     int dstW, int dstH, int dstPitch, float originU, float originV,
     float h00, float h01, float h02,
     float h10, float h11, float h12,
@@ -305,7 +439,7 @@ __global__ void WarpDualKernel(
     float v = (float)y + originV;
 
     // ── Image 1: identity warp (just translate into canvas) ──
-    float val1 = std::nanf("");  // Padded pixels get nan so they show up as black in visualization and don't contribute to error metrics
+    float val1 = std::nanf(""); // Padded pixels get nan so they show up as black in visualization and don't contribute to error metrics
     if (u >= 0.0f && u < (float)(src1W - 1) && v >= 0.0f && v < (float)(src1H - 1))
     {
         int x0 = (int)u;
@@ -314,19 +448,16 @@ __global__ void WarpDualKernel(
         int y1 = y0 + 1;
         float fx = u - (float)x0;
         float fy = v - (float)y0;
-        val1 = (1.0f - fx) * (1.0f - fy) * src1[y0 * src1Pitch + x0]
-             + fx          * (1.0f - fy) * src1[y0 * src1Pitch + x1]
-             + (1.0f - fx) * fy          * src1[y1 * src1Pitch + x0]
-             + fx          * fy          * src1[y1 * src1Pitch + x1];
+        val1 = (1.0f - fx) * (1.0f - fy) * src1[y0 * src1Pitch + x0] + fx * (1.0f - fy) * src1[y0 * src1Pitch + x1] + (1.0f - fx) * fy * src1[y1 * src1Pitch + x0] + fx * fy * src1[y1 * src1Pitch + x1];
     }
     dst1[y * dstPitch + x] = val1;
 
     // ── Image 2: homography warp ──
-    float z  = h20 * u + h21 * v + h22;
+    float z = h20 * u + h21 * v + h22;
     float sx = (h00 * u + h01 * v + h02) / z;
     float sy = (h10 * u + h11 * v + h12) / z;
 
-    float val2 = std::nanf("");  // Padded pixels get nan so they show up as black in visualization and don't contribute to error metrics
+    float val2 = std::nanf(""); // Padded pixels get nan so they show up as black in visualization and don't contribute to error metrics
     if (sx >= 0.0f && sx < (float)(src2W - 1) && sy >= 0.0f && sy < (float)(src2H - 1))
     {
         int x0 = (int)sx;
@@ -335,18 +466,17 @@ __global__ void WarpDualKernel(
         int y1 = y0 + 1;
         float fx = sx - (float)x0;
         float fy = sy - (float)y0;
-        val2 = (1.0f - fx) * (1.0f - fy) * src2[y0 * src2Pitch + x0]
-             + fx          * (1.0f - fy) * src2[y0 * src2Pitch + x1]
-             + (1.0f - fx) * fy          * src2[y1 * src2Pitch + x0]
-             + fx          * fy          * src2[y1 * src2Pitch + x1];
+        val2 = (1.0f - fx) * (1.0f - fy) * src2[y0 * src2Pitch + x0] + fx * (1.0f - fy) * src2[y0 * src2Pitch + x1] + (1.0f - fx) * fy * src2[y1 * src2Pitch + x0] + fx * fy * src2[y1 * src2Pitch + x1];
     }
     dst2[y * dstPitch + x] = val2;
 }
 
 // ── Main entry point ────────────────────────────────────
-void WarpImages(const Image_t* image1, const Image_t* image2, const float* homography,
-                Image_t* warped_image1, Image_t* warped_image2, bool useGPU)
+void WarpImages(const Image_t *image1, const Image_t *image2, const float *homography,
+                Image_t *warped_image1, Image_t *warped_image2, bool useGPU)
 {
+    cusift_api_guard([&]()
+                     {
     int w1 = image1->width_, h1 = image1->height_;
     int w2 = image2->width_, h2 = image2->height_;
 
@@ -455,8 +585,8 @@ void WarpImages(const Image_t* image1, const Image_t* image2, const float* homog
     {
         float* out1 = out1Guard.get();
         float* out2 = out2Guard.get();
-        // ── CPU path ────────────────────────────────────
-        #pragma omp parallel for schedule(dynamic, 16)
+// ── CPU path ────────────────────────────────────
+#pragma omp parallel for schedule(dynamic, 16)
         for (int y = 0; y < outH; y++)
         {
             float v = (float)y + originV;
@@ -483,11 +613,13 @@ void WarpImages(const Image_t* image1, const Image_t* image2, const float* homog
 
     warped_image2->host_img_ = out2Guard.release();
     warped_image2->width_    = outW;
-    warped_image2->height_   = outH;
+    warped_image2->height_   = outH; }); // end cusift_api_guard for WarpImages
 }
 
-void ExtractAndMatchAndFindHomographyAndWarp(const Image_t* image1, const Image_t* image2, SiftData* sift_data1, SiftData* sift_data2, float* homography, int* num_matches, const ExtractSiftOptions_t* extract_options, const FindHomographyOptions_t* homography_options, Image_t* warped_image1, Image_t* warped_image2)
+void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
 {
+    cusift_api_guard([&]()
+                     {
     int w1 = image1->width_, h1 = image1->height_;
     int w2 = image2->width_, h2 = image2->height_;
     int maxW = std::max(w1, w2);
@@ -639,6 +771,5 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t* image1, const Image_
 
     warped_image2->host_img_ = out2Guard.release();
     warped_image2->width_    = outW;
-    warped_image2->height_   = outH;
+    warped_image2->height_   = outH; }); // end cusift_api_guard for ExtractAndMatchAndFindHomographyAndWarp
 }
-

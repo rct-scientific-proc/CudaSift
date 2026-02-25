@@ -28,14 +28,16 @@ void CudaImage_init(CudaImage *img)
 
 void CudaImage_destroy(CudaImage *img)
 {
+    // Use cudaFree directly (not safeCall) so this function is safe
+    // to call from destructors during stack unwinding.
     if (img->d_internalAlloc && img->d_data != NULL)
-        safeCall(cudaFree(img->d_data));
+        cudaFree(img->d_data);
     img->d_data = NULL;
     if (img->h_internalAlloc && img->h_data != NULL)
         free(img->h_data);
     img->h_data = NULL;
     if (img->t_data != NULL)
-        safeCall(cudaFreeArray((cudaArray *)img->t_data));
+        cudaFreeArray((cudaArray *)img->t_data);
     img->t_data = NULL;
 }
 
@@ -67,7 +69,7 @@ void CudaImage_Allocate(CudaImage *img, int w, int h, int p, bool host, float *d
 void CudaImage_Download(CudaImage *img)
 {
     int p = sizeof(float) * img->pitch;
-    if (img->d_data != NULL && img->h_data != NULL)
+    //if (img->d_data != NULL && img->h_data != NULL)
         safeCall(cudaMemcpy2D(img->d_data, p, img->h_data, sizeof(float) * img->width, sizeof(float) * img->width, img->height, cudaMemcpyHostToDevice));
 }
 

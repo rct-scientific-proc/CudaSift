@@ -3,6 +3,9 @@
 
 #include <cstdio>
 #include <iostream>
+#include <string>
+#include <stdexcept>
+#include <sstream>
 
 #ifdef _WIN32
 #include <intrin.h>
@@ -16,8 +19,10 @@ inline void __safeCall(cudaError err, const char *file, const int line)
 {
     if (cudaSuccess != err)
     {
-        fprintf(stderr, "safeCall() Runtime API error in file <%s>, line %i : %s.\n", file, line, cudaGetErrorString(err));
-        exit(-1);
+        // Throw a runtime error with the error message, line number, and filename
+        std::ostringstream oss;
+        oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
+        throw std::runtime_error(oss.str());
     }
 }
 
@@ -26,18 +31,20 @@ inline void __safeThreadSync(const char *file, const int line)
     cudaError err = cudaDeviceSynchronize();
     if (cudaSuccess != err)
     {
-        fprintf(stderr, "threadSynchronize() Driver API error in file '%s' in line %i : %s.\n", file, line, cudaGetErrorString(err));
-        exit(-1);
+        std::ostringstream oss;
+        oss << "CUDA error during cudaDeviceSynchronize() in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
+        throw std::runtime_error(oss.str());
     }
 }
 
 inline void __checkMsg(const char *errorMessage, const char *file, const int line)
 {
-    cudaError_t err = cudaGetLastError();
+    cudaError_t err = cudaPeekAtLastError();
     if (cudaSuccess != err)
     {
-        fprintf(stderr, "checkMsg() CUDA error: %s in file <%s>, line %i : %s.\n", errorMessage, file, line, cudaGetErrorString(err));
-        exit(-1);
+        std::ostringstream oss;
+        oss << "CUDA error: " << errorMessage << " in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
+        throw std::runtime_error(oss.str());
     }
 }
 

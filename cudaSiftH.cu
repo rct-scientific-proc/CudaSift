@@ -10,6 +10,7 @@
 #include <thrust/sort.h>
 
 #include "cudautils.h"
+#include "cusift.h"
 
 #include "cudaImage.h"
 #include "cudaSift.h"
@@ -74,8 +75,10 @@ float *AllocSiftTempMemory(int width, int height, int numOctaves)
 // Keep
 void FreeSiftTempMemory(float *memoryTmp)
 {
+    // Use cudaFree directly (not safeCall) so this function is safe
+    // to call from destructors during stack unwinding.
     if (memoryTmp)
-        safeCall(cudaFree(memoryTmp));
+        cudaFree(memoryTmp);
 }
 
 // Keep
@@ -215,8 +218,10 @@ void InitSiftData(SiftData *data, int num, bool host, bool dev)
 // Keep
 void FreeSiftData(SiftData *data)
 {
+    // Use cudaFree directly (not safeCall) so this function is safe
+    // to call from destructors during stack unwinding.
     if (data->d_data != NULL)
-        safeCall(cudaFree(data->d_data));
+        cudaFree(data->d_data);
     data->d_data = NULL;
     if (data->h_data != NULL)
         free(data->h_data);

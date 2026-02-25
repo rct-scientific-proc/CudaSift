@@ -176,6 +176,18 @@ int main(int argc, char** argv)
 
     ExtractAndMatchAndFindHomographyAndWarp(&image1, &image2, &sift1, &sift2, homography, &num_matches, &extract_opts, &homo_opts, &warped1, &warped2);
 
+    if (CusiftHadError())
+    {
+        char error_message[256];
+        char error_file[256];
+        int error_line = 0;
+        CusiftGetLastErrorString(&error_line, error_file, error_message);
+        fprintf(stderr, "Error: %s\nOccurred in file '%s' at line %d\n", error_message, error_file, error_line);
+        free(pixels1);
+        free(pixels2);
+        return 1;
+    }
+
     printf("Found %d matches\n", num_matches);
     PrintHomography(homography);
 
@@ -200,6 +212,10 @@ int main(int argc, char** argv)
     free(pixels2);
     free(warped1.host_img_);
     free(warped2.host_img_);
+
+    // Free sift data
+    DeleteSiftData(&sift1);
+    DeleteSiftData(&sift2);
 
     printf("Done.\n");
     return 0;
