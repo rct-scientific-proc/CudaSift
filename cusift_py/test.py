@@ -36,7 +36,7 @@ def main() -> None:
     # -- Extract ----------------------------------------------------------
     extract_opts = ExtractOptions(
         thresh=3.0,
-        lowest_scale=0.0,
+        lowest_scale=4.0,
         edge_thresh=10.0,
         init_blur=1.0,
         max_keypoints=32768,
@@ -54,6 +54,10 @@ def main() -> None:
     if len(kp1) == 0 or len(kp2) == 0:
         print("ERROR: No keypoints extracted - cannot continue.")
         sys.exit(1)
+
+    # Draw keypoints on the first image and save as PNG (for visual verification)
+    sift.draw_keypoints(str(IMG1), kp1, str(DATA_DIR / "img1_kp_py.png"))
+    sift.draw_keypoints(str(IMG2), kp2, str(DATA_DIR / "img2_kp_py.png"))
 
     # Print a sample keypoint
     sample = kp1[0]

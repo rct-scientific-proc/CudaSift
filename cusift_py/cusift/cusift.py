@@ -229,6 +229,52 @@ def _load_image_grayscale(path: Union[str, Path]) -> tuple[np.ndarray, int, int]
     return np.ascontiguousarray(arr), w, h
 
 
+def _resolve_image_arg(
+    image: Union[str, Path, np.ndarray],
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    label: str = "image",
+) -> tuple[np.ndarray, int, int]:
+    """Turn an image argument into ``(pixels, width, height)``.
+
+    Accepts a file path (loaded via Pillow), a 2-D numpy array
+    ``(H, W)``, or a 1-D array (requires explicit *width*/*height*).
+
+    Returns
+    -------
+    (pixels, w, h) : tuple[numpy.ndarray, int, int]
+    """
+    if isinstance(image, (str, Path)):
+        pixels, w, h = _load_image_grayscale(image)
+    elif isinstance(image, np.ndarray):
+        if image.ndim == 2:
+            h, w = image.shape
+            pixels = image
+        elif image.ndim == 1:
+            if width is None or height is None:
+                raise ValueError(
+                    f"width and height must be supplied for 1-D arrays ({label})"
+                )
+            w, h = width, height
+            pixels = image
+        else:
+            raise ValueError(
+                f"Expected a 1-D or 2-D array for {label}, got shape {image.shape}"
+            )
+    else:
+        raise TypeError(
+            f"{label} must be a file path or numpy array, got {type(image)}"
+        )
+
+    # Explicit overrides
+    if width is not None:
+        w = width
+    if height is not None:
+        h = height
+
+    return pixels, w, h
+
+
 # -- Keypoint list with SiftData handle ---------------------------------------
 
 
@@ -331,33 +377,7 @@ class CuSift:
             If the underlying C library reports an error.
         """
         # -- Resolve pixel data -------------------------------------------
-        if isinstance(image, (str, Path)):
-            pixels, w, h = _load_image_grayscale(image)
-        elif isinstance(image, np.ndarray):
-            if image.ndim == 2:
-                h, w = image.shape
-                pixels = image
-            elif image.ndim == 1:
-                if width is None or height is None:
-                    raise ValueError(
-                        "width and height must be supplied for 1-D arrays"
-                    )
-                w, h = width, height
-                pixels = image
-            else:
-                raise ValueError(
-                    f"Expected a 1-D or 2-D array, got shape {image.shape}"
-                )
-        else:
-            raise TypeError(
-                f"image must be a file path or numpy array, got {type(image)}"
-            )
-
-        # Override w/h if explicitly given
-        if width is not None:
-            w = width
-        if height is not None:
-            h = height
+        pixels, w, h = _resolve_image_arg(image, width, height)
 
         # -- Build ctypes arguments ---------------------------------------
         img_ct, _pixels_ref = _make_image_t(pixels, w, h)
@@ -574,57 +594,9 @@ class CuSift:
         CuSiftError
             If the underlying C library reports an error.
         """
-        # -- Resolve pixel data for image 1 -------------------------------
-        if isinstance(image1, (str, Path)):
-            pix1, w1, h1 = _load_image_grayscale(image1)
-        elif isinstance(image1, np.ndarray):
-            if image1.ndim == 2:
-                h1, w1 = image1.shape
-            elif image1.ndim == 1:
-                if width1 is None or height1 is None:
-                    raise ValueError(
-                        "width1 and height1 must be supplied for 1-D arrays"
-                    )
-                w1, h1 = width1, height1
-            else:
-                raise ValueError(
-                    f"Expected a 1-D or 2-D array for image1, got shape {image1.shape}"
-                )
-            pix1 = image1
-        else:
-            raise TypeError(
-                f"image1 must be a file path or numpy array, got {type(image1)}"
-            )
-        if width1 is not None:
-            w1 = width1
-        if height1 is not None:
-            h1 = height1
-
-        # -- Resolve pixel data for image 2 -------------------------------
-        if isinstance(image2, (str, Path)):
-            pix2, w2, h2 = _load_image_grayscale(image2)
-        elif isinstance(image2, np.ndarray):
-            if image2.ndim == 2:
-                h2, w2 = image2.shape
-            elif image2.ndim == 1:
-                if width2 is None or height2 is None:
-                    raise ValueError(
-                        "width2 and height2 must be supplied for 1-D arrays"
-                    )
-                w2, h2 = width2, height2
-            else:
-                raise ValueError(
-                    f"Expected a 1-D or 2-D array for image2, got shape {image2.shape}"
-                )
-            pix2 = image2
-        else:
-            raise TypeError(
-                f"image2 must be a file path or numpy array, got {type(image2)}"
-            )
-        if width2 is not None:
-            w2 = width2
-        if height2 is not None:
-            h2 = height2
+        # -- Resolve pixel data -------------------------------------------
+        pix1, w1, h1 = _resolve_image_arg(image1, width1, height1, "image1")
+        pix2, w2, h2 = _resolve_image_arg(image2, width2, height2, "image2")
 
         # -- Build ctypes arguments ---------------------------------------
         img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
@@ -664,4 +636,107 @@ class CuSift:
         self._lib.FreeImage(byref(warped2_ct))
 
         return warped1, warped2
+
+    # -- Visualisation ----------------------------------------------------
+
+    @staticmethod
+    def draw_keypoints(
+        image: Union[str, Path, np.ndarray],
+        keypoints: KeypointList,
+        output: Union[str, Path],
+        *,
+        radius_scale: float = 3.0,
+        orientation_color: str = "red",
+        line_width: int = 1,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> None:
+        """Draw keypoints on an image and save to *output*.
+
+        Each keypoint is drawn as a circle (scaled by ``scale``) with
+        an orientation tick line.  The circle colour is derived from the
+        keypoint's ``subsampling`` value — the set of unique subsampling values is mapped
+        across an HSV hue ramp so that different octaves are visually
+        distinct.
+
+        Parameters
+        ----------
+        image : str | Path | numpy.ndarray
+            Source image (file path or 2-D float32 array).
+        keypoints : KeypointList
+            Keypoints to draw (returned by :meth:`extract`).
+        output : str | Path
+            File path for the annotated image (e.g. ``"features.png"``).
+        radius_scale : float
+            Multiplier applied to each keypoint's ``scale`` to determine
+            the circle radius (default 3.0).
+        orientation_color : str
+            Colour for the orientation tick (default ``"red"``).
+        line_width : int
+            Stroke width for circles and ticks (default 1).
+        width, height : int, optional
+            Dimension overrides when *image* is a 1-D array.
+        """
+        import colorsys
+        import math
+
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError as exc:
+            raise ImportError(
+                "Pillow is required for draw_keypoints.  "
+                "Install it with:  pip install Pillow"
+            ) from exc
+
+        # -- Build a subsampling → colour mapping -------------------------
+        subsample = set(sorted({kp.subsampling for kp in keypoints}))
+        if len(subsample) <= 1:
+            scale_color = {s: (0, 255, 0) for s in subsample}  # fallback green
+        else:
+            scale_color = {}
+            for idx, s in enumerate(subsample):
+                hue = idx / len(subsample)  # 0 … ~1 spread across the hue wheel
+                r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+                scale_color[s] = (int(r * 255), int(g * 255), int(b * 255))
+
+        # -- Load / convert to a PIL Image --------------------------------
+        if isinstance(image, (str, Path)):
+            img = Image.open(image).convert("RGB")
+        elif isinstance(image, np.ndarray):
+            pixels, w, h = _resolve_image_arg(image, width, height, "image")
+            arr = np.nan_to_num(pixels, nan=0.0)
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+            if arr.ndim == 1:
+                arr = arr.reshape(h, w)
+            img = Image.fromarray(arr, mode="L").convert("RGB")
+        else:
+            raise TypeError(
+                f"image must be a file path or numpy array, got {type(image)}"
+            )
+
+        draw = ImageDraw.Draw(img)
+
+        for kp in keypoints:
+            x, y = kp.x, kp.y
+            s = kp.scale * radius_scale
+            orient = kp.orientation
+            rgb = scale_color[kp.subsampling]
+
+            # Circle at keypoint location
+            draw.ellipse(
+                [x - s, y - s, x + s, y + s],
+                outline=rgb,
+                width=line_width,
+            )
+
+            # Orientation tick
+            dx = s * math.cos(orient)
+            dy = s * math.sin(orient)
+            draw.line(
+                [(x, y), (x + dx, y + dy)],
+                fill=orientation_color,
+                width=line_width,
+            )
+
+        img.save(str(output))
 
