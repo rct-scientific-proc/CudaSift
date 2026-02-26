@@ -740,3 +740,208 @@ class CuSift:
 
         img.save(str(output))
 
+    @staticmethod
+    def draw_descriptor(
+        image: Union[str, Path, np.ndarray],
+        keypoints: KeypointList,
+        index: int,
+        output: Union[str, Path],
+        *,
+        patch_size: int = 256,
+        grid_size: int = 256,
+        spoke_color: str = "cyan",
+        bg_color: str = "black",
+        grid_line_color: str = "#444444",
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> None:
+        """Visualise a single keypoint's 128-d SIFT descriptor.
+
+        Produces a side-by-side image: the left half shows the image
+        patch centred on the keypoint (with a crosshair and circle),
+        and the right half shows the 4×4 grid of 8-bin orientation
+        histograms (rose/polar plots) that make up the descriptor.
+
+        Parameters
+        ----------
+        image : str | Path | numpy.ndarray
+            Source image (file path or 2-D float32 array).
+        keypoints : KeypointList
+            Keypoints returned by :meth:`extract`.
+        index : int
+            Index into *keypoints* selecting which descriptor to draw.
+        output : str | Path
+            File path for the output image (e.g. ``"descriptor.png"``).
+        patch_size : int
+            Size in pixels of the image-patch panel (default 256).
+        grid_size : int
+            Size in pixels of the histogram-grid panel (default 256).
+        spoke_color : str
+            Colour for histogram spoke lines (default ``"cyan"``).
+        bg_color : str
+            Background colour for the histogram panel (default ``"black"``).
+        grid_line_color : str
+            Colour for the 4×4 grid lines (default ``"#444444"``).
+        width, height : int, optional
+            Dimension overrides when *image* is a 1-D array.
+        """
+        import math
+
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError as exc:
+            raise ImportError(
+                "Pillow is required for draw_descriptor.  "
+                "Install it with:  pip install Pillow"
+            ) from exc
+
+        if index < 0 or index >= len(keypoints):
+            raise IndexError(
+                f"Keypoint index {index} out of range (0..{len(keypoints) - 1})"
+            )
+
+        kp = keypoints[index]
+        desc = kp.descriptor  # shape (128,)
+
+        # -- Load the source image ----------------------------------------
+        if isinstance(image, (str, Path)):
+            src = Image.open(image).convert("RGB")
+        elif isinstance(image, np.ndarray):
+            pixels, w, h = _resolve_image_arg(image, width, height, "image")
+            arr = np.nan_to_num(pixels, nan=0.0)
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+            if arr.ndim == 1:
+                arr = arr.reshape(h, w)
+            src = Image.fromarray(arr, mode="L").convert("RGB")
+        else:
+            raise TypeError(
+                f"image must be a file path or numpy array, got {type(image)}"
+            )
+
+        # -- Left panel: image patch centred on keypoint ------------------
+        # Crop a square region around the keypoint, then resize.
+        radius = max(kp.scale * 6, 16)  # visible patch radius in src pixels
+        cx, cy = kp.x, kp.y
+        left = int(cx - radius)
+        top = int(cy - radius)
+        right = int(cx + radius)
+        bottom = int(cy + radius)
+
+        # Pad if the crop box extends outside the image
+        img_w, img_h = src.size
+        pad_l = max(0, -left)
+        pad_t = max(0, -top)
+        pad_r = max(0, right - img_w)
+        pad_b = max(0, bottom - img_h)
+
+        crop_left = max(left, 0)
+        crop_top = max(top, 0)
+        crop_right = min(right, img_w)
+        crop_bottom = min(bottom, img_h)
+
+        patch = src.crop((crop_left, crop_top, crop_right, crop_bottom))
+        if pad_l or pad_t or pad_r or pad_b:
+            padded = Image.new("RGB", (right - left, bottom - top), (0, 0, 0))
+            padded.paste(patch, (pad_l, pad_t))
+            patch = padded
+
+        patch = patch.resize((patch_size, patch_size), Image.LANCZOS)
+        draw_patch = ImageDraw.Draw(patch)
+
+        # Draw crosshair at centre
+        mid = patch_size // 2
+        ch_len = 10
+        draw_patch.line(
+            [(mid - ch_len, mid), (mid + ch_len, mid)], fill="red", width=1
+        )
+        draw_patch.line(
+            [(mid, mid - ch_len), (mid, mid + ch_len)], fill="red", width=1
+        )
+        # Draw circle showing the keypoint scale
+        scale_r = (kp.scale * 3) / (2 * radius) * patch_size
+        draw_patch.ellipse(
+            [mid - scale_r, mid - scale_r, mid + scale_r, mid + scale_r],
+            outline="lime",
+            width=1,
+        )
+
+        # -- Right panel: 4×4 histogram grid -----------------------------
+        hist_panel = Image.new("RGB", (grid_size, grid_size), bg_color)
+        draw_hist = ImageDraw.Draw(hist_panel)
+
+        cell = grid_size / 4  # cell size in pixels
+        half = cell / 2
+
+        # Reshape descriptor: 4 rows × 4 cols × 8 orientations
+        bins = desc.reshape(4, 4, 8)
+        max_val = bins.max() if bins.max() > 0 else 1.0  # normalise
+
+        # Draw grid lines
+        for i in range(1, 4):
+            coord = int(i * cell)
+            draw_hist.line(
+                [(coord, 0), (coord, grid_size)],
+                fill=grid_line_color,
+                width=1,
+            )
+            draw_hist.line(
+                [(0, coord), (grid_size, coord)],
+                fill=grid_line_color,
+                width=1,
+            )
+
+        # Draw 8-bin rose plot in each cell
+        for row in range(4):
+            for col in range(4):
+                cx_h = col * cell + half
+                cy_h = row * cell + half
+                max_spoke = half * 0.85  # leave a small margin
+
+                for b in range(8):
+                    angle = b * (2 * math.pi / 8) - math.pi / 2  # 0 = up
+                    magnitude = bins[row, col, b] / max_val
+                    spoke_len = magnitude * max_spoke
+
+                    ex = cx_h + spoke_len * math.cos(angle)
+                    ey = cy_h + spoke_len * math.sin(angle)
+                    draw_hist.line(
+                        [(cx_h, cy_h), (ex, ey)],
+                        fill=spoke_color,
+                        width=2,
+                    )
+
+        # -- Combine panels side-by-side ----------------------------------
+        total_w = patch_size + grid_size
+        total_h = max(patch_size, grid_size)
+        combined = Image.new("RGB", (total_w, total_h), (0, 0, 0))
+        combined.paste(patch, (0, 0))
+        combined.paste(hist_panel, (patch_size, 0))
+
+        # Add a thin separator line
+        draw_combined = ImageDraw.Draw(combined)
+        draw_combined.line(
+            [(patch_size, 0), (patch_size, total_h)],
+            fill="white",
+            width=1,
+        )
+
+        # Label the panels
+        try:
+            font = ImageFont.truetype("arial.ttf", 12)
+        except (IOError, OSError):
+            font = ImageFont.load_default()
+
+        draw_combined.text(
+            (4, 4),
+            f"Keypoint #{index}  scale={kp.scale:.2f}  sub={kp.subsampling:.0f}",
+            fill="yellow",
+            font=font,
+        )
+        draw_combined.text(
+            (patch_size + 4, 4),
+            "4\u00d74\u00d78 Descriptor",
+            fill="yellow",
+            font=font,
+        )
+
+        combined.save(str(output))
