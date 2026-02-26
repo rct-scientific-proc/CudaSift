@@ -1,7 +1,56 @@
+/**
+ * @file cusift.h
+ * @author rct-scientific-proc
+ * @brief 
+ * @version 0.1
+ * @date 2026-02-25
+ * 
+ * @cite
+ * M. Björkman, N. Bergström and D. Kragic, "Detecting, segmenting and tracking unknown objects using multi-label MRF inference", CVIU, 118, pp. 111-127, January 2014
+ * 
+ * MIT License
+ *
+ * Copyright (c) 2017 Mårten Björkman
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ * 
+ * Export Functions:
+ * - InitializeCudaSift()   
+ * - ExtractSiftFromImage()
+ * - MatchSiftData()
+ * - FindHomography()
+ * - WarpImages()
+ * - DeleteSiftData()
+ * - CusiftGetLastErrorString()
+ * - CusiftHadError()
+ * - SaveSiftData()
+ * - ExtractAndMatchSift()
+ * - ExtractAndMatchAndFindHomography()
+ * - ExtractAndMatchAndFindHomographyAndWarp()
+ *
+ */
+
+
 #ifndef CUSIFT_H
 #define CUSIFT_H
 
-// ── Export / import macros ──────────────────────────────
+// -- Export / import macros ------------------------------
 #ifdef CUSIFT_STATIC
 #define CUSIFT_API
 #elif defined(_WIN32)
@@ -87,15 +136,16 @@ extern "C"
      * detector and the SIFT descriptor computation.  Typical defaults are
      * shown in square brackets after each field.
      *
-     * ── Detector thresholds ──────────────────────────────────────────────
+     * -- Detector thresholds ----------------------------------------------
      *
-     *   thresh_        [~0.02-0.10]
+     *   thresh_        [~2.0-5.0]
      *       Contrast threshold applied to DoG extrema.  A candidate
      *       keypoint is accepted only when its absolute DoG response
      *       exceeds this value.  Higher values reject low-contrast
      *       features and produce fewer, more stable keypoints.
      *       Lower values retain weaker features at the cost of more
-     *       noise.
+     *       noise. Think of a higher value as a bigger magnitude difference
+     *       between the keypoint and its neighbors in the DoG scale-space.
      *
      *   lowest_scale_  [~0.0]
      *       Minimum feature scale (in pixels of the original image)
@@ -113,7 +163,7 @@ extern "C"
      *       Lowe's original paper uses (r+1)²/r with r=10, giving
      *       a value of ~12.1.
      *
-     * ── Scale-space construction ─────────────────────────────────────────
+     * -- Scale-space construction -----------------------------------------
      *
      *   init_blur_     [~1.0]
      *       Assumed blur level (sigma) of the input image.  The
@@ -131,7 +181,7 @@ extern "C"
      *       requested count exceeds that limit.  More octaves detect
      *       larger-scale features but increase computation.
      *
-     * ── Capacity ─────────────────────────────────────────────────────────
+     * -- Capacity ---------------------------------------------------------
      *
      *   max_keypoints_ [~8192]
      *       Maximum number of keypoints that will be returned.  This
@@ -168,7 +218,7 @@ extern "C"
      *      for `improve_num_loops_` iterations to converge on a more
      *      accurate solution.
      *
-     * ── RANSAC stage ─────────────────────────────────────────────────────
+     * -- RANSAC stage -----------------------------------------------------
      *
      *   num_loops_      [~1000]
      *       Number of RANSAC iterations.  Each iteration draws 4
@@ -203,7 +253,7 @@ extern "C"
      *       smaller values are stricter.  Internally squared before
      *       comparison.
      *
-     * ── Refinement stage ─────────────────────────────────────────────────
+     * -- Refinement stage -------------------------------------------------
      *
      *   improve_num_loops_      [~3-5]
      *       Number of iterative re-estimation rounds.  Each round
@@ -232,7 +282,7 @@ extern "C"
      *       `thresh_` to sharpen the final model.  Internally squared
      *       before comparison.
      *
-     * ── Reproducibility ──────────────────────────────────────────────────
+     * -- Reproducibility --------------------------------------------------
      *
      *   seed_           [0]
      *       Seed for the PRNG that generates random 4-point samples
@@ -308,6 +358,18 @@ extern "C"
      * @param sift_data Pointer to the SiftData structure to be deleted.
      */
     CUSIFT_API void DeleteSiftData(SiftData *sift_data);
+
+    /**
+     * @brief Free the pixel buffer owned by an Image_t structure.
+     *
+     * This is intended for images whose ``host_img_`` was allocated by the
+     * library (e.g. the warped output images from WarpImages()).  After
+     * this call ``image->host_img_`` is set to NULL and the dimensions
+     * are zeroed.
+     *
+     * @param image Pointer to the Image_t whose pixel buffer should be freed.
+     */
+    CUSIFT_API void FreeImage(Image_t *image);
 
     /**
      * @brief Save SIFT features from a SiftData structure to a json file.

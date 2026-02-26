@@ -211,6 +211,18 @@ void DeleteSiftData(SiftData *sift_data)
                      { FreeSiftData(sift_data); });
 }
 
+void FreeImage(Image_t *image)
+{
+    if (image)
+        if (image->host_img_)
+        {
+            free(image->host_img_);
+            image->host_img_ = nullptr;
+            image->width_ = 0;
+            image->height_ = 0;
+        }
+}
+
 void SaveSiftData(const char *filename, const SiftData *sift_data)
 {
     if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
@@ -393,7 +405,7 @@ bool Invert3x3(const float *M, float *out)
 inline float SampleBilinear(const float *img, int w, int h, float x, float y)
 {
     if (x < 0.0f || x >= (float)(w - 1) || y < 0.0f || y >= (float)(h - 1))
-        return 0.0f;
+        return std::nanf(""); // Out of bounds; caller should check before sampling but return nan just in case
 
     int x0 = (int)x;
     int y0 = (int)y;
@@ -551,33 +563,39 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
         DevicePtrGuard<float> d_src1Guard, d_src2Guard;
         DevicePtrGuard<float> d_out1Guard, d_out2Guard;
 
-        size_t out1Stride = 0;
-        size_t out2Stride = 0;
+        size_t src1Pitch = 0, src2Pitch = 0;
+        size_t out1Pitch = 0, out2Pitch = 0;
 
-        safeCall(cudaMallocPitch(&d_src1Guard.getRef(), &out1Stride, w1 * sizeof(float), h1));
-        safeCall(cudaMallocPitch(&d_src2Guard.getRef(), &out2Stride, w2 * sizeof(float), h2));
-        safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Stride, outW * sizeof(float), outH));
-        safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Stride, outW * sizeof(float), outH));
+        safeCall(cudaMallocPitch(&d_src1Guard.getRef(), &src1Pitch, w1 * sizeof(float), h1));
+        safeCall(cudaMallocPitch(&d_src2Guard.getRef(), &src2Pitch, w2 * sizeof(float), h2));
+        safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Pitch, outW * sizeof(float), outH));
+        safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Pitch, outW * sizeof(float), outH));
 
-        safeCall(cudaMemcpy2D(d_src1Guard.get(), out1Stride, image1->host_img_, w1 * sizeof(float), w1 * sizeof(float), h1, cudaMemcpyHostToDevice));
-        safeCall(cudaMemcpy2D(d_src2Guard.get(), out2Stride, image2->host_img_, w2 * sizeof(float), w2 * sizeof(float), h2, cudaMemcpyHostToDevice));
+        safeCall(cudaMemcpy2D(d_src1Guard.get(), src1Pitch, image1->host_img_, w1 * sizeof(float), w1 * sizeof(float), h1, cudaMemcpyHostToDevice));
+        safeCall(cudaMemcpy2D(d_src2Guard.get(), src2Pitch, image2->host_img_, w2 * sizeof(float), w2 * sizeof(float), h2, cudaMemcpyHostToDevice));
+
+        // Strides in elements (pixels) for the kernel
+        int src1StrideElem = (int)(src1Pitch / sizeof(float));
+        int src2StrideElem = (int)(src2Pitch / sizeof(float));
+        int out1StrideElem = (int)(out1Pitch / sizeof(float));
+        // out2 stride same width as out1 since both are outW
 
         dim3 threads(16, 16);
         dim3 blocks((outW + threads.x - 1) / threads.x, (outH + threads.y - 1) / threads.y);
 
         // Warp both images in a single kernel launch
         WarpDualKernel<<<blocks, threads>>>(
-            d_src1Guard.get(), d_out1Guard.get(), w1, h1, w1,
-            d_src2Guard.get(), d_out2Guard.get(), w2, h2, w2,
-            outW, outH, outW, originU, originV,
+            d_src1Guard.get(), d_out1Guard.get(), w1, h1, src1StrideElem,
+            d_src2Guard.get(), d_out2Guard.get(), w2, h2, src2StrideElem,
+            outW, outH, out1StrideElem, originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
 
         cudaDeviceSynchronize();
 
-        cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost);
-        cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost);
+        cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Pitch, outW * sizeof(float), outH, cudaMemcpyDeviceToHost);
+        cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Pitch, outW * sizeof(float), outH, cudaMemcpyDeviceToHost);
 
         // d_src1Guard, d_src2Guard, d_out1Guard, d_out2Guard freed automatically
     }
