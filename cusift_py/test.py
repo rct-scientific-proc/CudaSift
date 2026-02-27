@@ -35,7 +35,7 @@ def main() -> None:
 
     # -- Extract ----------------------------------------------------------
     extract_opts = ExtractOptions(
-        thresh=3.0,
+        thresh=2.0,
         lowest_scale=8.0,
         edge_thresh=10.0,
         init_blur=1.0,
@@ -51,18 +51,8 @@ def main() -> None:
     kp2 = sift.extract(str(IMG2), options=extract_opts)
     print(f"  → {len(kp2)} keypoints")
 
-    # Extract an index to a keypoint with a subsampling value greater than 8 to test the descriptor visualizations.
-
-    high_subsampling_kp = None
-    idx = None
-    for i, kp in enumerate(kp1):
-        if kp.scale > 8.0:
-            high_subsampling_kp = [kp]
-            print(f"\n  Found keypoint with scale {kp.scale:.3f} > 8.0 at index {i} for descriptor visualization.")
-            idx = i
-            break
-    if high_subsampling_kp:
-        sift.draw_descriptor(str(IMG1), kp1, idx, str(DATA_DIR / "img1_kp_subsampled_py.png"))
+    # Min sampling value set to 8.0, so only keypoints with scale >= 8.0 will have their descriptors drawn.
+    sift.draw_descriptors(str(IMG1), kp1, 8, str(DATA_DIR / "img1_desc_py.png"))
 
     if len(kp1) == 0 or len(kp2) == 0:
         print("ERROR: No keypoints extracted - cannot continue.")
