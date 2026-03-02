@@ -1,12 +1,13 @@
 /**
  * @file cusift.h
  * @author rct-scientific-proc
- * @brief 
+ * @brief C API for the CudaSift GPU-accelerated SIFT feature library.
  * @version 0.1
  * @date 2026-02-25
- * 
- * @cite
+ *
+ * @par References
  * M. Björkman, N. Bergström and D. Kragic, "Detecting, segmenting and tracking unknown objects using multi-label MRF inference", CVIU, 118, pp. 111-127, January 2014
+ * https://github.com/Celebrandil/CudaSift
  * 
  * MIT License
  *
@@ -94,39 +95,48 @@ extern "C"
      */
     CUSIFT_API int CusiftHadError(void);
 
+    /**
+     * @brief A single SIFT keypoint with its 128-d descriptor.
+     */
     typedef struct
     {
-        float xpos;
-        float ypos;
-        float scale;
-        float sharpness;
-        float edgeness;
-        float orientation;
-        float score;
-        float ambiguity;
-        int match;
-        float match_xpos;
-        float match_ypos;
-        float match_error;
-        float subsampling;
-        float empty[3];
-        float data[128];
+        float xpos;        /**< X position in pixels. */
+        float ypos;        /**< Y position in pixels. */
+        float scale;       /**< Detected scale (sigma). */
+        float sharpness;   /**< DoG response sharpness. */
+        float edgeness;    /**< Edge response (trace^2/det of Hessian). */
+        float orientation; /**< Dominant orientation in radians. */
+        float score;       /**< Match score (set by MatchSiftData). */
+        float ambiguity;   /**< Ratio of best to second-best match distance. */
+        int match;         /**< Index of matched keypoint, or -1 if unmatched. */
+        float match_xpos;  /**< X position of the matched keypoint. */
+        float match_ypos;  /**< Y position of the matched keypoint. */
+        float match_error; /**< Match error (L2 descriptor distance ratio). */
+        float subsampling; /**< Subsampling factor (octave). */
+        float empty[3];    /**< Padding for alignment. */
+        float data[128];   /**< 128-dimensional SIFT descriptor. */
     } SiftPoint;
 
+    /**
+     * @brief Container for a set of SIFT keypoints on host and device.
+     */
     typedef struct
     {
-        int numPts; // Number of available Sift points
-        int maxPts; // Number of allocated Sift points
+        int numPts;         /**< Number of available SIFT points. */
+        int maxPts;         /**< Number of allocated SIFT points. */
 
-        SiftPoint *h_data; // Host (CPU) data
-        SiftPoint *d_data; // Device (GPU) data
+        SiftPoint *h_data;  /**< Host (CPU) data. */
+        SiftPoint *d_data;  /**< Device (GPU) data. */
     } SiftData;
 
+    /**
+     * @brief A grayscale image stored as a contiguous float buffer.
+     */
     typedef struct
     {
-        float *host_img_;
-        int width_;
-        int height_;
+        float *host_img_;  /**< Pointer to row-major float32 pixel data. */
+        int width_;        /**< Image width in pixels. */
+        int height_;       /**< Image height in pixels. */
     } Image_t;
 
     /**
@@ -193,12 +203,12 @@ extern "C"
      */
     typedef struct
     {
-        float thresh_;
-        float lowest_scale_;
-        float edge_thresh_;
-        float init_blur_;
-        int max_keypoints_;
-        int num_octaves_;
+        float thresh_;          /**< Contrast threshold applied to DoG extrema. */
+        float lowest_scale_;    /**< Minimum feature scale (in pixels) to keep. */
+        float edge_thresh_;     /**< Edge rejection threshold (ratio of principal curvatures). */
+        float init_blur_;       /**< Assumed blur level (sigma) of the input image. */
+        int max_keypoints_;     /**< Maximum number of keypoints to return. */
+        int num_octaves_;       /**< Number of octave levels in the scale-space pyramid. */
     } ExtractSiftOptions_t;
 
     /**
@@ -293,17 +303,17 @@ extern "C"
      */
     typedef struct
     {
-        int num_loops_;
-        float min_score_;
-        float max_ambiguity_;
-        float thresh_;
+        int num_loops_;                 /**< Number of RANSAC iterations. */
+        float min_score_;               /**< Minimum match score to consider a correspondence. */
+        float max_ambiguity_;           /**< Maximum ambiguity for a correspondence to be considered. */
+        float thresh_;                  /**< Inlier distance threshold for RANSAC. */
 
-        int improve_num_loops_;
-        float improve_min_score_;
-        float improve_max_ambiguity_;
-        float improve_thresh_;
+        int improve_num_loops_;         /**< Number of iterative refinement rounds. */
+        float improve_min_score_;       /**< Minimum match score for a correspondence to participate in refinement. */
+        float improve_max_ambiguity_;   /**< Maximum ambiguity for a correspondence to participate in refinement. */
+        float improve_thresh_;          /**< Inlier distance threshold for refinement. */
 
-        unsigned int seed_; // 0 = non-deterministic (random_device)
+        unsigned int seed_; /**< Seed for the PRNG that generates random 4-point samples in RANSAC. 0 = non-deterministic (random_device) */
     } FindHomographyOptions_t;
 
     /**
@@ -362,9 +372,9 @@ extern "C"
     /**
      * @brief Free the pixel buffer owned by an Image_t structure.
      *
-     * This is intended for images whose ``host_img_`` was allocated by the
+     * This is intended for images whose @c host_img_ was allocated by the
      * library (e.g. the warped output images from WarpImages()).  After
-     * this call ``image->host_img_`` is set to NULL and the dimensions
+     * this call <tt>image->host_img_</tt> is set to NULL and the dimensions
      * are zeroed.
      *
      * @param image Pointer to the Image_t whose pixel buffer should be freed.
@@ -386,7 +396,7 @@ extern "C"
      * @param image2 Pointer to the second input image.
      * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
      * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-     * @param extract_options ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
      */
     CUSIFT_API void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options);
 
@@ -399,8 +409,8 @@ extern "C"
      * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param extract_options ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     * @param homography_options HomographyOptions_t structure containing parameters for homography computation.
+     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
      */
     CUSIFT_API void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
 
@@ -414,8 +424,8 @@ extern "C"
      * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param extract_options ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     * @param homography_options FindHomographyOptions_t structure containing parameters for homography computation.
+     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
      * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
      * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
      */
