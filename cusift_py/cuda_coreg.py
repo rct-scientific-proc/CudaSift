@@ -53,8 +53,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                      help="RANSAC iterations (default: 10000).")
     hom.add_argument("--min-score", type=float, default=0.0,
                      help="Minimum match score (default: 0.0).")
-    hom.add_argument("--max-ambiguity", type=float, default=0.80,
-                     help="Maximum match ambiguity (default: 0.80).")
+    hom.add_argument("--max-ambiguity", type=float, default=0.90,
+                     help="Maximum match ambiguity (default: 0.90).")
     hom.add_argument("--ransac-thresh", type=float, default=5.0,
                      help="RANSAC inlier distance threshold (default: 5.0).")
     hom.add_argument("--improve-num-loops", type=int, default=5,
@@ -82,6 +82,90 @@ def _save_warped_image(pixels: np.ndarray, path: Path) -> None:
 
     arr = np.nan_to_num(np.clip(pixels, 1, 255), nan=0.0)
     Image.fromarray(arr.astype(np.uint8), mode="L").save(str(path))
+
+
+def _make_imfuse(warped1: np.ndarray, warped2: np.ndarray) -> np.ndarray:
+    """Create a MATLAB-style imfuse false-color composite from two warped images.
+
+    Both inputs are float32 arrays of the same shape.  NaN or 0 pixels
+    are treated as background (no data).  The overlap region is used to
+    linearly equalise the intensities of the two images to a common
+    target (mean=128) before compositing.
+
+    The output is an ``(H, W, 3)`` uint8 RGB array where image1 is
+    mapped to magenta (R+B) and image2 to green (G).  Aligned areas
+    appear grey/white; differences show as colour.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(H, W, 3)`` uint8 RGB composite.
+    """
+    # -- Build valid-pixel masks (non-NaN and non-zero) -------------------
+    valid1 = np.isfinite(warped1) & (warped1 != 0)
+    valid2 = np.isfinite(warped2) & (warped2 != 0)
+    overlap = valid1 & valid2
+
+    # -- Clean copies with background set to 0 ---------------------------
+    img1 = np.where(valid1, warped1, 0.0).astype(np.float64)
+    img2 = np.where(valid2, warped2, 0.0).astype(np.float64)
+
+    # -- Intensity equalisation over the overlap region -------------------
+    target_mean = 128.0
+    if overlap.any():
+        for img, valid in [(img1, valid1), (img2, valid2)]:
+            region = img[overlap]
+            mu = region.mean()
+            sigma = region.std()
+            if sigma > 1e-6:
+                img[valid] = (img[valid] - mu) / sigma
+                # Rescale so the overlap mean lands on target_mean with
+                # a reasonable spread (target_std = 40 keeps most values
+                # within 0-255 while preserving contrast).
+                img[valid] = img[valid] * 40.0 + target_mean
+            else:
+                img[valid] = target_mean
+
+    # -- Clip to [0, 255] and zero out background -------------------------
+    img1 = np.clip(img1, 0, 255) * valid1
+    img2 = np.clip(img2, 0, 255) * valid2
+
+    u1 = img1.astype(np.uint8)
+    u2 = img2.astype(np.uint8)
+
+    # -- Compose: image1 → magenta (R+B), image2 → green (G) -------------
+    rgb = np.zeros((*warped1.shape, 3), dtype=np.uint8)
+    rgb[..., 0] = u1        # R ← image1
+    rgb[..., 1] = u2        # G ← image2
+    rgb[..., 2] = u1        # B ← image1
+
+    return rgb
+
+
+def _filter_inliers(
+    matches: list,
+    H: np.ndarray,
+    thresh: float,
+) -> list:
+    """Return only matches consistent with the homography *H*.
+
+    A match is an inlier when the Euclidean distance between the
+    projected point ``H @ [x1, y1, 1]`` and ``[x2, y2]`` is at most
+    *thresh* pixels — the same geometric test RANSAC uses.
+    """
+    if len(matches) == 0:
+        return []
+
+    pts1 = np.array([[m.x1, m.y1] for m in matches], dtype=np.float64)
+    ones = np.ones((len(matches), 1), dtype=np.float64)
+    pts1_h = np.hstack([pts1, ones])                    # (N, 3)
+    proj = (H @ pts1_h.T).T                             # (N, 3)
+    proj_xy = proj[:, :2] / proj[:, 2:3]                # perspective divide
+
+    pts2 = np.array([[m.x2, m.y2] for m in matches], dtype=np.float64)
+    errors = np.linalg.norm(proj_xy - pts2, axis=1)
+
+    return [m for m, e in zip(matches, errors) if e <= thresh]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -166,6 +250,13 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\n  Saved warped images:")
     print(f"    {warped1_path}")
     print(f"    {warped2_path}")
+
+    # -- Save false-color composite (imfuse-style) ------------------------
+    from PIL import Image as PILImage
+    composite = _make_imfuse(warped1, warped2)
+    composite_path = out_dir / "composite_imfuse.png"
+    PILImage.fromarray(composite, mode="RGB").save(str(composite_path))
+    print(f"  Saved imfuse composite: {composite_path}")
 
     # -- Save homography matrix (plain text) ------------------------------
     homography_path = out_dir / "homography.txt"
@@ -276,6 +367,7 @@ def main(argv: list[str] | None = None) -> None:
             "descriptors_image1": str(desc1_path),
             "descriptors_image2": str(desc2_path),
             "descriptor_format": "contiguous float32 little-endian, shape (M, 128)",
+            "composite_imfuse": str(composite_path),
         },
     }
     meta_path = out_dir / "metadata.json"
@@ -297,6 +389,15 @@ def main(argv: list[str] | None = None) -> None:
         matches_vis = vis_dir / "matches.png"
         sift.draw_matches(str(img1_path), str(img2_path), matches, str(matches_vis))
         print(f"  Saved match visualization: {matches_vis}")
+
+        # Inlier-only matches (reprojection error <= RANSAC threshold)
+        inlier_matches = _filter_inliers(matches, H, args.ransac_thresh)
+        if inlier_matches:
+            inliers_vis = vis_dir / "matches_inliers.png"
+            sift.draw_matches(
+                str(img1_path), str(img2_path), inlier_matches, str(inliers_vis),
+            )
+            print(f"  Saved inlier match visualization ({len(inlier_matches)} inliers): {inliers_vis}")
 
     # Descriptor visualizations (filtered by --min-subsampling)
     if args.min_subsampling > 0:

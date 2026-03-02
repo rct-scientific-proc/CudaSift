@@ -2,3 +2,4 @@ local/
 build/
 install/
 __pycache__/
+.venv/
