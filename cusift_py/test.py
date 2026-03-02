@@ -183,6 +183,58 @@ def main() -> None:
     kp1b.free()
     kp2b.free()
 
+    # =====================================================================
+    # Test extract_and_match_and_find_homography → warp_images pipeline
+    # =====================================================================
+    print("\n" + "=" * 60)
+    print("Testing extract_and_match_and_find_homography combo pipeline")
+    print("=" * 60)
+
+    print(f"\nExtracting, matching & finding homography in one call ...")
+    kp1c, kp2c, matches_c, H_c, n_inliers_c = sift.extract_and_match_and_find_homography(
+        str(IMG1), str(IMG2),
+        extract_options=extract_opts,
+        homography_options=homo_opts,
+    )
+    print(f"  → {len(kp1c)} keypoints from {IMG1.name}")
+    print(f"  → {len(kp2c)} keypoints from {IMG2.name}")
+    print(f"  → {len(matches_c)} correspondences")
+    print(f"  → {n_inliers_c} inliers")
+    print("  Homography:")
+    for r in range(3):
+        vals = " ".join(f"{H_c[r, c]:12.6f}" for c in range(3))
+        print(f"    [{vals}]")
+
+    if matches_c:
+        for m in matches_c[:5]:
+            print(f"    kp1[{m.query_index}] ({m.x1:.1f}, {m.y1:.1f}) "
+                  f"↔ kp2[{m.match_index}] ({m.x2:.1f}, {m.y2:.1f})  "
+                  f"err={m.error:.4f}")
+
+    # -- Warp Images (combo homography) -----------------------------------
+    print("\nWarping images (combo homography) ...")
+    warped1c, warped2c = sift.warp_images(str(IMG1), str(IMG2), H_c, use_gpu=True)
+    print(f"  warped1 shape: {warped1c.shape}  dtype: {warped1c.dtype}")
+    print(f"  warped2 shape: {warped2c.shape}  dtype: {warped2c.dtype}")
+
+    try:
+        from PIL import Image as PILImg
+
+        out1c = DATA_DIR / "img1_warped_combo_homog_py.png"
+        out2c = DATA_DIR / "img2_warped_combo_homog_py.png"
+        warped1c = np.nan_to_num(np.clip(warped1c, 1, 255), nan=0.0)
+        warped2c = np.nan_to_num(np.clip(warped2c, 1, 255), nan=0.0)
+        PILImg.fromarray(warped1c.astype(np.uint8), mode="L").save(out1c)
+        PILImg.fromarray(warped2c.astype(np.uint8), mode="L").save(out2c)
+        print(f"\n  Saved combo homography warped images to:\n    {out1c}\n    {out2c}")
+    except ImportError:
+        print("\n  (Pillow not installed - skipping warped image save)")
+    except Exception as e:
+        print(f"\n  Error saving combo homography warped images: {e}")
+
+    kp1c.free()
+    kp2c.free()
+
     print("\n" + "=" * 60)
     print("All tests passed!")
     print("=" * 60)
