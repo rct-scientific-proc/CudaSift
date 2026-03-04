@@ -69,6 +69,7 @@ class ExtractSiftOptions_t(Structure):
         ("init_blur_", c_float),
         ("max_keypoints_", c_int),
         ("num_octaves_", c_int),
+        ("scale_suppression_radius_", c_float),
     ]
 
 

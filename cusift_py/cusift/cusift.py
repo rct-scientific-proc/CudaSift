@@ -154,6 +154,11 @@ class ExtractOptions:
     num_octaves: int = 5
     """Number of octave levels in the scale-space pyramid."""
 
+    scale_suppression_radius: float = 0.0
+    """Scale-NMS radius multiplier (0 = disabled). When > 0, smaller-scale
+    keypoints within ``radius * larger_scale`` pixels of a larger keypoint
+    are removed. 6.0 is a good starting value."""
+
     def _to_ctypes(self) -> ExtractSiftOptions_t:
         return ExtractSiftOptions_t(
             thresh_=self.thresh,
@@ -162,6 +167,7 @@ class ExtractOptions:
             init_blur_=self.init_blur,
             max_keypoints_=self.max_keypoints,
             num_octaves_=self.num_octaves,
+            scale_suppression_radius_=self.scale_suppression_radius,
         )
 
 

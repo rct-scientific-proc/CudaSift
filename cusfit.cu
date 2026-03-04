@@ -2,6 +2,7 @@
 #include "cudautils.h"
 #include "cudaImage.h"
 #include "cudaSift.h"
+#include "cudaSiftH.h"
 #include "geomFuncs.h"
 #include "RAII_Gaurds.hpp"
 
@@ -171,7 +172,9 @@ void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const Extra
             options->thresh_,
             options->lowest_scale_,
             options->edge_thresh_,
-            tempMemory.get()); });
+            tempMemory.get());
+        if (options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data, options->scale_suppression_radius_); });
 }
 
 void MatchSiftData(SiftData *data1, SiftData *data2)
@@ -302,6 +305,8 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
                     extract_options->init_blur_, extract_options->thresh_,
                     extract_options->lowest_scale_, extract_options->edge_thresh_,
                     tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data1, extract_options->scale_suppression_radius_);
 
         // Extract from image 2
         InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
@@ -313,6 +318,8 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
                     extract_options->init_blur_, extract_options->thresh_,
                     extract_options->lowest_scale_, extract_options->edge_thresh_,
                     tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
 
         // Match
         MatchSiftData_private(sift_data1, sift_data2); });
@@ -346,6 +353,8 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
                     extract_options->init_blur_, extract_options->thresh_,
                     extract_options->lowest_scale_, extract_options->edge_thresh_,
                     tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data1, extract_options->scale_suppression_radius_);
 
         // Extract from image 2
         InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
@@ -357,6 +366,8 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
                     extract_options->init_blur_, extract_options->thresh_,
                     extract_options->lowest_scale_, extract_options->edge_thresh_,
                     tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
 
         // Match
         MatchSiftData_private(sift_data1, sift_data2);
@@ -662,6 +673,8 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
                 extract_options->init_blur_, extract_options->thresh_,
                 extract_options->lowest_scale_, extract_options->edge_thresh_,
                 tempMemory.get());
+    if (extract_options->scale_suppression_radius_ > 0.0f)
+        SuppressEmbeddedPoints(sift_data1, extract_options->scale_suppression_radius_);
 
     // Image 2
     InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
@@ -672,6 +685,8 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
                 extract_options->init_blur_, extract_options->thresh_,
                 extract_options->lowest_scale_, extract_options->edge_thresh_,
                 tempMemory.get());
+    if (extract_options->scale_suppression_radius_ > 0.0f)
+        SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
 
     // ── Match ────────────────────────────────────────────────────────────
     MatchSiftData_private(sift_data1, sift_data2);

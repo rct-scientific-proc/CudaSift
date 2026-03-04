@@ -200,6 +200,21 @@ extern "C"
      *       candidates than this limit, the excess are silently
      *       dropped.  Set this high enough for your application to
      *       avoid losing valid features.
+     *
+     * -- Post-extraction filtering ----------------------------------------
+     *
+     *   scale_suppression_radius_  [0.0 = disabled]
+     *       When > 0, enables scale-based non-maximum suppression
+     *       after extraction.  For every detected keypoint, any
+     *       smaller-scale keypoint whose centre lies within
+     *       ``scale_suppression_radius_ * larger_scale`` pixels is
+     *       removed.  This keeps only the dominant-scale feature in
+     *       each spatial neighbourhood, eliminating redundant
+     *       detections of the same object at finer scales.
+     *
+     *       A value of 6.0 corresponds to the SIFT descriptor patch
+     *       radius and is a good starting point.  Set to 0.0 (the
+     *       default) to disable suppression entirely.
      */
     typedef struct
     {
@@ -209,98 +224,9 @@ extern "C"
         float init_blur_;       /**< Assumed blur level (sigma) of the input image. */
         int max_keypoints_;     /**< Maximum number of keypoints to return. */
         int num_octaves_;       /**< Number of octave levels in the scale-space pyramid. */
+        float scale_suppression_radius_;  /**< Scale-NMS radius multiplier (0 = disabled). */
     } ExtractSiftOptions_t;
 
-    /**
-     * @brief Options controlling RANSAC-based homography estimation and
-     *        iterative refinement.
-     *
-     * The homography pipeline has two stages:
-     *
-     *   1. **RANSAC estimation** – randomly samples 4 matched point pairs,
-     *      computes a candidate homography, and counts inliers.  Repeated
-     *      for `num_loops_` iterations; the candidate with the most
-     *      inliers wins.
-     *
-     *   2. **Iterative refinement** – takes the RANSAC result and
-     *      re-estimates the homography using weighted least-squares
-     *      (Cholesky solve) over all inlier correspondences.  Repeated
-     *      for `improve_num_loops_` iterations to converge on a more
-     *      accurate solution.
-     *
-     * -- RANSAC stage -----------------------------------------------------
-     *
-     *   num_loops_      [~1000]
-     *       Number of RANSAC iterations.  Each iteration draws 4
-     *       random correspondences, computes a homography, and counts
-     *       how many other correspondences agree within `thresh_`
-     *       pixels.  Internally rounded up to a multiple of 16 for
-     *       GPU occupancy.  More iterations increase the chance of
-     *       finding the best model but take longer.
-     *
-     *   min_score_      [~0.0]
-     *       Minimum match score a correspondence must have to be
-     *       eligible for RANSAC sampling.  The `score` field on each
-     *       SiftPoint is set during matching.  Correspondences with
-     *       `score < min_score_` are excluded from sampling and
-     *       cannot be drawn as one of the 4 random points.  Raise
-     *       this to restrict RANSAC to high-confidence matches.
-     *
-     *   max_ambiguity_  [~1.0]
-     *       Maximum match ambiguity a correspondence may have and
-     *       still be used for RANSAC sampling.  Ambiguity is the
-     *       ratio between the best and second-best match distances;
-     *       values closer to 1.0 are more ambiguous.
-     *       Correspondences with `ambiguity > max_ambiguity_` are
-     *       excluded.  Lower values enforce stricter uniqueness.
-     *
-     *   thresh_         [~5.0, pixels]
-     *       Inlier distance threshold for RANSAC.  After projecting
-     *       a point through a candidate homography, if the reprojection
-     *       error (Euclidean pixel distance) is less than `thresh_`
-     *       the correspondence is counted as an inlier.  Larger values
-     *       tolerate more noise but risk accepting wrong models;
-     *       smaller values are stricter.  Internally squared before
-     *       comparison.
-     *
-     * -- Refinement stage -------------------------------------------------
-     *
-     *   improve_num_loops_      [~3-5]
-     *       Number of iterative re-estimation rounds.  Each round
-     *       recomputes the homography using weighted least-squares
-     *       over all correspondences, applying binary inlier/outlier
-     *       weights based on `improve_thresh_`.  A few iterations
-     *       (3–5) typically suffice for convergence.
-     *
-     *   improve_min_score_      [~0.0]
-     *       Minimum match score for a correspondence to participate
-     *       in the refinement solve.  Same semantics as `min_score_`
-     *       but applied independently; you may choose a different
-     *       (often lower) threshold here to include more points in
-     *       the least-squares fit.
-     *
-     *   improve_max_ambiguity_  [~1.0]
-     *       Maximum ambiguity for refinement participation.  Same
-     *       semantics as `max_ambiguity_` but applied independently
-     *       during the refinement stage.
-     *
-     *   improve_thresh_         [~3.0, pixels]
-     *       Inlier distance threshold for refinement.  During each
-     *       re-estimation round, correspondences whose reprojection
-     *       error exceeds this threshold receive zero weight (binary
-     *       outlier rejection).  Typically set tighter than the RANSAC
-     *       `thresh_` to sharpen the final model.  Internally squared
-     *       before comparison.
-     *
-     * -- Reproducibility --------------------------------------------------
-     *
-     *   seed_           [0]
-     *       Seed for the PRNG that generates random 4-point samples
-     *       in RANSAC.  Set to a non-zero value for deterministic,
-     *       reproducible results.  When 0, a hardware random device
-     *       is used to seed the generator, making each run
-     *       non-deterministic.
-     */
     typedef struct
     {
         int num_loops_;                 /**< Number of RANSAC iterations. */

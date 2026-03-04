@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include <algorithm>
+#include <vector>
 #include <thrust/sort.h>
 
 #include "cudautils.h"
@@ -149,7 +150,6 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     if (siftData->h_data)
         safeCall(cudaMemcpy(siftData->h_data, siftData->d_data, sizeof(SiftPoint) * siftData->numPts, cudaMemcpyDeviceToHost));
     // lowImgGuard, memoryTmpGuard, and contextMemGuard are cleaned up automatically
-
 }
 
 // Keep
@@ -374,4 +374,138 @@ double FindPointsMulti(CudaImage *sources, SiftData *siftData, float thresh, flo
     FindPointsMultiNew<<<blocks, threads>>>(sources->d_data, siftData->d_data, w, p, h, subsampling, lowestScale, thresh, factor, edgeLimit, octave, ctx.maxNumPoints, ctx.d_pointCounter);
     checkMsg("FindPointsMulti() execution failed\n");
     return 0.0;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Scale-based non-maximum suppression
+///////////////////////////////////////////////////////////////////////////////
+
+// Keep
+void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
+{
+    if (!data || !data->h_data || data->numPts <= 1)
+        return;
+
+    const int n = data->numPts;
+    SiftPoint *pts = data->h_data;
+
+    // --- Build an index sorted by scale (descending) --------------------
+    std::vector<int> order(n);
+    for (int i = 0; i < n; i++)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return pts[a].scale > pts[b].scale;
+    });
+
+    // --- Spatial grid for fast neighbour lookup -------------------------
+    // Cell size = radius of the largest keypoint so that we only need to
+    // check a 3×3 neighbourhood of cells.
+    float maxScale = pts[order[0]].scale;
+    float cellSize = radiusScale * maxScale;
+    if (cellSize < 1e-6f)
+        return;  // degenerate – all scales are ~0
+
+    // Find bounding box
+    float minX = pts[0].xpos, maxX = minX;
+    float minY = pts[0].ypos, maxY = minY;
+    for (int i = 1; i < n; i++) {
+        float x = pts[i].xpos, y = pts[i].ypos;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+    }
+
+    int gridW = std::max(1, (int)((maxX - minX) / cellSize) + 1);
+    int gridH = std::max(1, (int)((maxY - minY) / cellSize) + 1);
+    // Cap grid to a reasonable size; fall back to flat scan for tiny cells
+    const int MAX_CELLS = 4096 * 4096;
+    bool useGrid = ((long long)gridW * gridH) <= MAX_CELLS;
+
+    // Map from grid cell → list of point indices (in scale-descending order)
+    std::vector<std::vector<int>> grid;
+    if (useGrid) {
+        grid.resize((size_t)gridW * gridH);
+        for (int i = 0; i < n; i++) {
+            int idx = order[i];
+            int cx = (int)((pts[idx].xpos - minX) / cellSize);
+            int cy = (int)((pts[idx].ypos - minY) / cellSize);
+            cx = std::min(cx, gridW - 1);
+            cy = std::min(cy, gridH - 1);
+            grid[(size_t)cy * gridW + cx].push_back(idx);
+        }
+    }
+
+    // --- Suppression pass ------------------------------------------------
+    std::vector<bool> suppressed(n, false);
+
+    for (int ii = 0; ii < n; ii++) {
+        int i = order[ii];
+        if (suppressed[i])
+            continue;
+
+        float xi = pts[i].xpos;
+        float yi = pts[i].ypos;
+        float ri = radiusScale * pts[i].scale;
+        float ri2 = ri * ri;
+
+        if (useGrid) {
+            int cx = (int)((xi - minX) / cellSize);
+            int cy = (int)((yi - minY) / cellSize);
+            cx = std::min(cx, gridW - 1);
+            cy = std::min(cy, gridH - 1);
+
+            // Check 5×5 neighbourhood to handle keypoints whose radius
+            // spans more than one cell (smaller scales use smaller radii,
+            // but the *current* large-scale point's radius may reach far).
+            int reach = std::max(1, (int)(ri / cellSize) + 1);
+            int gx0 = std::max(0, cx - reach);
+            int gx1 = std::min(gridW - 1, cx + reach);
+            int gy0 = std::max(0, cy - reach);
+            int gy1 = std::min(gridH - 1, cy + reach);
+
+            for (int gy = gy0; gy <= gy1; gy++) {
+                for (int gx = gx0; gx <= gx1; gx++) {
+                    for (int j : grid[(size_t)gy * gridW + gx]) {
+                        if (j == i || suppressed[j])
+                            continue;
+                        // j must be smaller-or-equal scale (processed after i)
+                        if (pts[j].scale > pts[i].scale)
+                            continue;
+                        float dx = pts[j].xpos - xi;
+                        float dy = pts[j].ypos - yi;
+                        if (dx * dx + dy * dy < ri2)
+                            suppressed[j] = true;
+                    }
+                }
+            }
+        } else {
+            // Flat scan fallback
+            for (int jj = ii + 1; jj < n; jj++) {
+                int j = order[jj];
+                if (suppressed[j])
+                    continue;
+                float dx = pts[j].xpos - xi;
+                float dy = pts[j].ypos - yi;
+                if (dx * dx + dy * dy < ri2)
+                    suppressed[j] = true;
+            }
+        }
+    }
+
+    // --- Compact ---------------------------------------------------------
+    int dst = 0;
+    for (int i = 0; i < n; i++) {
+        if (!suppressed[i]) {
+            if (dst != i)
+                pts[dst] = pts[i];
+            dst++;
+        }
+    }
+    data->numPts = dst;
+
+    // --- Re-upload to device if device buffer exists ---------------------
+    if (data->d_data && dst > 0)
+        safeCall(cudaMemcpy(data->d_data, data->h_data,
+                            sizeof(SiftPoint) * dst, cudaMemcpyHostToDevice));
 }

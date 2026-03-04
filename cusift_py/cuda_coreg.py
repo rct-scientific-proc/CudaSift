@@ -52,6 +52,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                      help="Maximum keypoints per image (default: 32768).")
     ext.add_argument("--num-octaves", type=int, default=5,
                      help="Number of scale-space octaves (default: 5).")
+    ext.add_argument("--scale-suppression-radius", type=float, default=0.0,
+                     help="Scale-NMS radius multiplier (0 = disabled). "
+                          "Removes smaller-scale keypoints near larger ones. "
+                          "6.0 is a good starting value (default: 0.0).")
 
     # -- Homography / RANSAC options -------------------------------------
     hom = p.add_argument_group("Homography / RANSAC parameters")
@@ -217,6 +221,7 @@ def main(argv: list[str] | None = None) -> None:
         init_blur=args.init_blur,
         max_keypoints=args.max_keypoints,
         num_octaves=args.num_octaves,
+        scale_suppression_radius=args.scale_suppression_radius,
     )
 
     homography_opts = HomographyOptions(
