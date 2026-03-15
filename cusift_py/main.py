@@ -3,6 +3,8 @@
 import json
 import math
 import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -13,6 +15,7 @@ from PyQt5.QtCore import QPointF, Qt
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -25,6 +28,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -33,6 +37,13 @@ from PyQt5.QtWidgets import (
 from cusift.cusift import CuSift, ExtractOptions, Keypoint
 
 # -- Types --------------------------------------------------------------------
+
+@dataclass
+class DetectedKeypoint:
+    """Detector-agnostic keypoint."""
+    x: float
+    y: float
+    scale: float
 
 PointList = List[Dict[str, float]]  # [{"x": ..., "y": ...}, ...]
 PerImageResults = Dict[str, dict]   # image_name -> {tp, fp, fn, keypoints}
@@ -68,7 +79,7 @@ def _match_files(gt_names: List[str], image_dir: str) -> Dict[str, Path]:
 
 
 def _classify_keypoints(
-    keypoints: List[Keypoint],
+    keypoints: List[DetectedKeypoint],
     gt_points: PointList,
     radius: float = MATCH_RADIUS,
 ) -> Tuple[List[dict], List[dict], List[dict]]:
@@ -113,6 +124,269 @@ def _numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
         else:
             qimg = QImage(arr.data, w, h, w, QImage.Format_Grayscale8)
     return QPixmap.fromImage(qimg.copy())
+
+
+# -- Detector abstraction -------------------------------------------------------
+
+class Detector(ABC):
+    """Base class for keypoint detectors."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Human-readable detector name shown in the combo box."""
+
+    @abstractmethod
+    def build_param_widget(self) -> QWidget:
+        """Return a QWidget containing detector-specific parameter controls."""
+
+    @abstractmethod
+    def extract(self, image: np.ndarray) -> List[DetectedKeypoint]:
+        """Detect keypoints in a grayscale float32 image (H×W, [0-255])."""
+
+    @abstractmethod
+    def get_params(self) -> dict:
+        """Return current parameters as a JSON-serialisable dict."""
+
+
+# -- CuSIFT detector -----------------------------------------------------------
+
+class CuSiftDetector(Detector):
+    name = "CuSIFT"
+
+    def __init__(self):
+        self._sift: Optional[CuSift] = None
+        self._widget: Optional[QWidget] = None
+        # Spin boxes stored after build
+        self._spins: Dict[str, QDoubleSpinBox] = {}
+        self._spin_ints: Dict[str, QSpinBox] = {}
+
+    def build_param_widget(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        def _dbl(name, lo, hi, dec, val):
+            s = QDoubleSpinBox(); s.setRange(lo, hi); s.setDecimals(dec); s.setValue(val)
+            self._spins[name] = s; form.addRow(f"{name}:", s)
+
+        def _int(name, lo, hi, val):
+            s = QSpinBox(); s.setRange(lo, hi); s.setValue(val)
+            self._spin_ints[name] = s; form.addRow(f"{name}:", s)
+
+        _dbl("Threshold", 0, 100, 2, 3.0)
+        _dbl("Lowest Scale", 0, 100, 2, 0.0)
+        _dbl("Highest Scale", 0, 100000, 2, 99999.0)
+        _dbl("Edge Threshold", 0, 100, 2, 10.0)
+        _dbl("Init Blur", 0, 10, 2, 1.0)
+        _int("Max Keypoints", 1, 131072, 32768)
+        _int("Num Octaves", 1, 10, 5)
+        _dbl("Scale Suppression Radius", 0, 50, 2, 0.0)
+
+        self._widget = w
+        return w
+
+    def extract(self, image: np.ndarray) -> List[DetectedKeypoint]:
+        if self._sift is None:
+            self._sift = CuSift()
+        opts = ExtractOptions(
+            thresh=self._spins["Threshold"].value(),
+            lowest_scale=self._spins["Lowest Scale"].value(),
+            highest_scale=self._spins["Highest Scale"].value(),
+            edge_thresh=self._spins["Edge Threshold"].value(),
+            init_blur=self._spins["Init Blur"].value(),
+            max_keypoints=self._spin_ints["Max Keypoints"].value(),
+            num_octaves=self._spin_ints["Num Octaves"].value(),
+            scale_suppression_radius=self._spins["Scale Suppression Radius"].value(),
+        )
+        kp_list = self._sift.extract(image, options=opts)
+        return [DetectedKeypoint(x=k.x, y=k.y, scale=k.scale) for k in kp_list]
+
+    def get_params(self) -> dict:
+        return {
+            "threshold": self._spins["Threshold"].value(),
+            "lowest_scale": self._spins["Lowest Scale"].value(),
+            "highest_scale": self._spins["Highest Scale"].value(),
+            "edge_threshold": self._spins["Edge Threshold"].value(),
+            "init_blur": self._spins["Init Blur"].value(),
+            "max_keypoints": self._spin_ints["Max Keypoints"].value(),
+            "num_octaves": self._spin_ints["Num Octaves"].value(),
+            "scale_suppression_radius": self._spins["Scale Suppression Radius"].value(),
+        }
+
+
+# -- OpenCV detectors ----------------------------------------------------------
+
+class _OpenCVDetector(Detector):
+    """Base for OpenCV Feature2D-based detectors."""
+
+    def __init__(self):
+        self._widget: Optional[QWidget] = None
+
+    @abstractmethod
+    def _create_feature2d(self):
+        """Return a cv2.Feature2D instance with current params."""
+
+    def extract(self, image: np.ndarray) -> List[DetectedKeypoint]:
+        import cv2
+        if image.dtype != np.uint8:
+            img_u8 = np.clip(image, 0, 255).astype(np.uint8)
+        else:
+            img_u8 = image
+        detector = self._create_feature2d()
+        kps = detector.detect(img_u8, None)
+        return [DetectedKeypoint(x=k.pt[0], y=k.pt[1], scale=k.size) for k in kps]
+
+
+class OrbDetector(_OpenCVDetector):
+    name = "ORB"
+
+    def __init__(self):
+        super().__init__()
+        self._spins: Dict[str, QSpinBox] = {}
+        self._dspins: Dict[str, QDoubleSpinBox] = {}
+
+    def build_param_widget(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        s = QSpinBox(); s.setRange(1, 100000); s.setValue(500)
+        self._spins["nFeatures"] = s; form.addRow("Max Features:", s)
+
+        s = QDoubleSpinBox(); s.setRange(1.0, 3.0); s.setDecimals(2); s.setValue(1.2)
+        self._dspins["scaleFactor"] = s; form.addRow("Scale Factor:", s)
+
+        s = QSpinBox(); s.setRange(1, 20); s.setValue(8)
+        self._spins["nLevels"] = s; form.addRow("Num Levels:", s)
+
+        s = QSpinBox(); s.setRange(0, 100); s.setValue(31)
+        self._spins["edgeThreshold"] = s; form.addRow("Edge Threshold:", s)
+
+        s = QSpinBox(); s.setRange(2, 100); s.setValue(31)
+        self._spins["patchSize"] = s; form.addRow("Patch Size:", s)
+
+        self._widget = w
+        return w
+
+    def _create_feature2d(self):
+        import cv2
+        return cv2.ORB_create(
+            nfeatures=self._spins["nFeatures"].value(),
+            scaleFactor=self._dspins["scaleFactor"].value(),
+            nlevels=self._spins["nLevels"].value(),
+            edgeThreshold=self._spins["edgeThreshold"].value(),
+            patchSize=self._spins["patchSize"].value(),
+        )
+
+    def get_params(self) -> dict:
+        return {k: s.value() for k, s in {**self._spins, **self._dspins}.items()}
+
+
+class AkazeDetector(_OpenCVDetector):
+    name = "AKAZE"
+
+    def __init__(self):
+        super().__init__()
+        self._dspins: Dict[str, QDoubleSpinBox] = {}
+        self._spins: Dict[str, QSpinBox] = {}
+
+    def build_param_widget(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        s = QDoubleSpinBox(); s.setRange(0.0001, 1.0); s.setDecimals(4); s.setValue(0.001)
+        self._dspins["threshold"] = s; form.addRow("Threshold:", s)
+
+        s = QSpinBox(); s.setRange(1, 10); s.setValue(4)
+        self._spins["nOctaves"] = s; form.addRow("Num Octaves:", s)
+
+        s = QSpinBox(); s.setRange(1, 10); s.setValue(4)
+        self._spins["nOctaveLayers"] = s; form.addRow("Octave Layers:", s)
+
+        self._widget = w
+        return w
+
+    def _create_feature2d(self):
+        import cv2
+        return cv2.AKAZE_create(
+            threshold=self._dspins["threshold"].value(),
+            nOctaves=self._spins["nOctaves"].value(),
+            nOctaveLayers=self._spins["nOctaveLayers"].value(),
+        )
+
+    def get_params(self) -> dict:
+        return {k: s.value() for k, s in {**self._dspins, **self._spins}.items()}
+
+
+class BriskDetector(_OpenCVDetector):
+    name = "BRISK"
+
+    def __init__(self):
+        super().__init__()
+        self._spins: Dict[str, QSpinBox] = {}
+        self._dspins: Dict[str, QDoubleSpinBox] = {}
+
+    def build_param_widget(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        s = QSpinBox(); s.setRange(1, 200); s.setValue(30)
+        self._spins["thresh"] = s; form.addRow("Threshold:", s)
+
+        s = QSpinBox(); s.setRange(0, 10); s.setValue(3)
+        self._spins["octaves"] = s; form.addRow("Octaves:", s)
+
+        s = QDoubleSpinBox(); s.setRange(0.0, 10.0); s.setDecimals(1); s.setValue(1.0)
+        self._dspins["patternScale"] = s; form.addRow("Pattern Scale:", s)
+
+        self._widget = w
+        return w
+
+    def _create_feature2d(self):
+        import cv2
+        return cv2.BRISK_create(
+            thresh=self._spins["thresh"].value(),
+            octaves=self._spins["octaves"].value(),
+            patternScale=self._dspins["patternScale"].value(),
+        )
+
+    def get_params(self) -> dict:
+        return {k: s.value() for k, s in {**self._spins, **self._dspins}.items()}
+
+
+class KazeDetector(_OpenCVDetector):
+    name = "KAZE"
+
+    def __init__(self):
+        super().__init__()
+        self._dspins: Dict[str, QDoubleSpinBox] = {}
+        self._spins: Dict[str, QSpinBox] = {}
+
+    def build_param_widget(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        s = QDoubleSpinBox(); s.setRange(0.0001, 1.0); s.setDecimals(4); s.setValue(0.001)
+        self._dspins["threshold"] = s; form.addRow("Threshold:", s)
+
+        s = QSpinBox(); s.setRange(1, 10); s.setValue(4)
+        self._spins["nOctaves"] = s; form.addRow("Num Octaves:", s)
+
+        s = QSpinBox(); s.setRange(1, 10); s.setValue(4)
+        self._spins["nOctaveLayers"] = s; form.addRow("Octave Layers:", s)
+
+        self._widget = w
+        return w
+
+    def _create_feature2d(self):
+        import cv2
+        return cv2.KAZE_create(
+            threshold=self._dspins["threshold"].value(),
+            nOctaves=self._spins["nOctaves"].value(),
+            nOctaveLayers=self._spins["nOctaveLayers"].value(),
+        )
+
+    def get_params(self) -> dict:
+        return {k: s.value() for k, s in {**self._dspins, **self._spins}.items()}
 
 
 # -- Zoomable Image Widget -----------------------------------------------------
@@ -209,19 +483,28 @@ class ZoomableImageWidget(QWidget):
 # -- Main Window --------------------------------------------------------------
 
 class SiftEvalApp(QWidget):
+    # All available detectors — add new ones here
+    DETECTORS: List[type] = [CuSiftDetector, OrbDetector, AkazeDetector, BriskDetector, KazeDetector]
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CuSIFT Keypoint Evaluator")
+        self.setWindowTitle("Keypoint Detector Evaluator")
         self.resize(1400, 900)
 
         # State
         self._gt_data: Dict[str, PointList] = {}
         self._image_paths: Dict[str, Path] = {}       # name -> file path
         self._results: PerImageResults = {}
-        self._sift: Optional[CuSift] = None
         self._current_image_name: Optional[str] = None
 
+        # Detector instances (created once, kept alive for the session)
+        self._detectors: List[Detector] = [cls() for cls in self.DETECTORS]
+
         self._build_ui()
+
+    @property
+    def _active_detector(self) -> Detector:
+        return self._detectors[self._combo_detector.currentIndex()]
 
     # -- UI construction -------------------------------------------------------
 
@@ -235,8 +518,16 @@ class SiftEvalApp(QWidget):
         self._btn_load_images = QPushButton("Select Image Directory")
         self._btn_load_images.clicked.connect(self._on_load_images)
         self._btn_load_images.setEnabled(False)
+
+        self._combo_detector = QComboBox()
+        for det in self._detectors:
+            self._combo_detector.addItem(det.name)
+        self._combo_detector.currentIndexChanged.connect(self._on_detector_changed)
+
         toolbar.addWidget(self._btn_load_json)
         toolbar.addWidget(self._btn_load_images)
+        toolbar.addWidget(QLabel("Detector:"))
+        toolbar.addWidget(self._combo_detector)
         toolbar.addStretch()
         root.addLayout(toolbar)
 
@@ -252,60 +543,17 @@ class SiftEvalApp(QWidget):
         self._image_view = ZoomableImageWidget()
         splitter.addWidget(self._image_view)
 
-        # -- Right: SIFT parameters --
+        # -- Right: detector parameters + evaluation --
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
-        param_group = QGroupBox("Extract Options")
-        form = QFormLayout()
-
-        self._spin_thresh = QDoubleSpinBox()
-        self._spin_thresh.setRange(0.0, 100.0)
-        self._spin_thresh.setDecimals(2)
-        self._spin_thresh.setValue(3.0)
-        form.addRow("Threshold:", self._spin_thresh)
-
-        self._spin_lowest_scale = QDoubleSpinBox()
-        self._spin_lowest_scale.setRange(0.0, 100.0)
-        self._spin_lowest_scale.setDecimals(2)
-        self._spin_lowest_scale.setValue(0.0)
-        form.addRow("Lowest Scale:", self._spin_lowest_scale)
-
-        self._spin_highest_scale = QDoubleSpinBox()
-        self._spin_highest_scale.setRange(0.0, 100000.0)
-        self._spin_highest_scale.setDecimals(2)
-        self._spin_highest_scale.setValue(99999.0)
-        form.addRow("Highest Scale:", self._spin_highest_scale)
-
-        self._spin_edge_thresh = QDoubleSpinBox()
-        self._spin_edge_thresh.setRange(0.0, 100.0)
-        self._spin_edge_thresh.setDecimals(2)
-        self._spin_edge_thresh.setValue(10.0)
-        form.addRow("Edge Threshold:", self._spin_edge_thresh)
-
-        self._spin_init_blur = QDoubleSpinBox()
-        self._spin_init_blur.setRange(0.0, 10.0)
-        self._spin_init_blur.setDecimals(2)
-        self._spin_init_blur.setValue(1.0)
-        form.addRow("Init Blur:", self._spin_init_blur)
-
-        self._spin_max_kp = QSpinBox()
-        self._spin_max_kp.setRange(1, 131072)
-        self._spin_max_kp.setValue(32768)
-        form.addRow("Max Keypoints:", self._spin_max_kp)
-
-        self._spin_octaves = QSpinBox()
-        self._spin_octaves.setRange(1, 10)
-        self._spin_octaves.setValue(5)
-        form.addRow("Num Octaves:", self._spin_octaves)
-
-        self._spin_scale_supp = QDoubleSpinBox()
-        self._spin_scale_supp.setRange(0.0, 50.0)
-        self._spin_scale_supp.setDecimals(2)
-        self._spin_scale_supp.setValue(0.0)
-        form.addRow("Scale Suppression Radius:", self._spin_scale_supp)
-
-        param_group.setLayout(form)
+        # Stacked widget for detector-specific parameter panels
+        param_group = QGroupBox("Detector Options")
+        param_inner = QVBoxLayout(param_group)
+        self._param_stack = QStackedWidget()
+        for det in self._detectors:
+            self._param_stack.addWidget(det.build_param_widget())
+        param_inner.addWidget(self._param_stack)
         right_layout.addWidget(param_group)
 
         # Match radius
@@ -325,9 +573,9 @@ class SiftEvalApp(QWidget):
         right_layout.addWidget(radius_group)
 
         # Run button
-        self._btn_run = QPushButton("Run SIFT")
+        self._btn_run = QPushButton("Run Detector")
         self._btn_run.setEnabled(False)
-        self._btn_run.clicked.connect(self._on_run_sift)
+        self._btn_run.clicked.connect(self._on_run_detector)
         right_layout.addWidget(self._btn_run)
 
         # Save button
@@ -371,6 +619,10 @@ class SiftEvalApp(QWidget):
 
     # -- Slots -----------------------------------------------------------------
 
+    def _on_detector_changed(self, index: int):
+        self._param_stack.setCurrentIndex(index)
+        self._status.showMessage(f"Detector: {self._active_detector.name}", 3000)
+
     def _on_load_json(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Ground-Truth JSON", "", "JSON Files (*.json)")
         if not path:
@@ -402,30 +654,11 @@ class SiftEvalApp(QWidget):
         self._current_image_name = name
         self._display_image(name)
 
-    def _get_extract_options(self) -> ExtractOptions:
-        return ExtractOptions(
-            thresh=self._spin_thresh.value(),
-            lowest_scale=self._spin_lowest_scale.value(),
-            highest_scale=self._spin_highest_scale.value(),
-            edge_thresh=self._spin_edge_thresh.value(),
-            init_blur=self._spin_init_blur.value(),
-            max_keypoints=self._spin_max_kp.value(),
-            num_octaves=self._spin_octaves.value(),
-            scale_suppression_radius=self._spin_scale_supp.value(),
-        )
-
-    def _on_run_sift(self):
+    def _on_run_detector(self):
         if not self._gt_data:
             return
 
-        if self._sift is None:
-            try:
-                self._sift = CuSift()
-            except Exception as exc:
-                QMessageBox.critical(self, "Error", f"Failed to initialise CuSIFT:\n{exc}")
-                return
-
-        opts = self._get_extract_options()
+        detector = self._active_detector
         radius = self._spin_radius.value()
         self._results.clear()
 
@@ -434,8 +667,8 @@ class SiftEvalApp(QWidget):
         total = len(work_items)
 
         # Set up progress dialog
-        progress = QProgressDialog("Running SIFT extraction...", "Cancel", 0, total, self)
-        progress.setWindowTitle("SIFT Progress")
+        progress = QProgressDialog(f"Running {detector.name} extraction...", "Cancel", 0, total, self)
+        progress.setWindowTitle(f"{detector.name} Progress")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -443,7 +676,7 @@ class SiftEvalApp(QWidget):
         def _utc_stamp() -> str:
             return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        print(f"[{_utc_stamp()}]: Starting SIFT extraction on {total} images")
+        print(f"[{_utc_stamp()}]: Starting {detector.name} extraction on {total} images")
 
         total_tp = total_fp = total_fn = 0
 
@@ -461,8 +694,7 @@ class SiftEvalApp(QWidget):
             pil_img = Image.open(str(self._image_paths[name])).convert("L")
             img_arg = np.array(pil_img, dtype=np.float32)
             try:
-                kp_list = self._sift.extract(img_arg, options=opts)
-                keypoints: List[Keypoint] = list(kp_list)
+                keypoints = detector.extract(img_arg)
             except Exception as exc:
                 print(f"[{_utc_stamp()}]: ERROR on {name}: {exc}")
                 self._status.showMessage(f"Error on {name}: {exc}")
@@ -484,7 +716,7 @@ class SiftEvalApp(QWidget):
         progress.setValue(total)
         progress.close()
 
-        print(f"[{_utc_stamp()}]: SIFT extraction complete — TP={total_tp} FP={total_fp} FN={total_fn}")
+        print(f"[{_utc_stamp()}]: {detector.name} extraction complete — TP={total_tp} FP={total_fp} FN={total_fn}")
 
         # Update metrics
         num_images = sum(1 for n in self._gt_data if n in self._image_paths)
@@ -507,7 +739,7 @@ class SiftEvalApp(QWidget):
         self._lbl_fp_per_img.setText(f"{fp_per_img:.2f}")
 
         self._btn_save.setEnabled(True)
-        self._status.showMessage("SIFT extraction complete.", 5000)
+        self._status.showMessage(f"{detector.name} extraction complete.", 5000)
 
         # Refresh current image view
         if self._current_image_name:
@@ -561,26 +793,18 @@ class SiftEvalApp(QWidget):
 
     def _on_save_results(self):
         if not self._results:
-            QMessageBox.information(self, "Nothing to save", "Run SIFT first.")
+            QMessageBox.information(self, "Nothing to save", "Run a detector first.")
             return
 
-        path, _ = QFileDialog.getSaveFileName(self, "Save Results", "sift_results.json", "JSON Files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Results", "detector_results.json", "JSON Files (*.json)")
         if not path:
             return
 
-        opts = self._get_extract_options()
+        detector = self._active_detector
 
         output = {
-            "sift_parameters": {
-                "thresh": opts.thresh,
-                "lowest_scale": opts.lowest_scale,
-                "highest_scale": opts.highest_scale,
-                "edge_thresh": opts.edge_thresh,
-                "init_blur": opts.init_blur,
-                "max_keypoints": opts.max_keypoints,
-                "num_octaves": opts.num_octaves,
-                "scale_suppression_radius": opts.scale_suppression_radius,
-            },
+            "detector": detector.name,
+            "detector_parameters": detector.get_params(),
             "match_radius": self._spin_radius.value(),
             "images": {},
         }
