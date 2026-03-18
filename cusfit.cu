@@ -752,9 +752,9 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
     float originU = (float)u0;
     float originV = (float)v0;
 
-    int maxW = 2 * std::max(image1->width_, image2->width_);
-    int maxH = 2 * std::max(image1->height_, image2->height_);
-    if (outW > maxW || outH > maxH)
+    int maxW_ = 2 * std::max(image1->width_, image2->width_);
+    int maxH_ = 2 * std::max(image1->height_, image2->height_);
+    if (outW > maxW_ || outH > maxH_)
     {
         fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: warped image too large (%dx%d), not attempting warp\n", outW, outH);
         return;
