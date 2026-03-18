@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 #include <iostream>
+#include <sstream>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -120,7 +121,7 @@ int CusiftHadError()
 void InitializeCudaSift()
 {
     cusift_api_guard([&]()
-                     {
+    {
         int nDevices;
         safeCall(cudaGetDeviceCount(&nDevices));
         if (!nDevices)
@@ -129,13 +130,14 @@ void InitializeCudaSift()
             return;
         }
         int devNum = std::min(nDevices - 1, 0);
-        safeCall(cudaSetDevice(devNum)); });
+        safeCall(cudaSetDevice(devNum));
+    });
 }
 
 void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options)
 {
     cusift_api_guard([&]()
-                     {
+    {
         CudaImageGuard cuda_image;
 
         InitSiftData(sift_data, options->max_keypoints_, true, true);
@@ -178,19 +180,22 @@ void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const Extra
             options->edge_thresh_,
             tempMemory.get());
         if (options->scale_suppression_radius_ > 0.0f)
-            SuppressEmbeddedPoints(sift_data, options->scale_suppression_radius_); });
+            SuppressEmbeddedPoints(sift_data, options->scale_suppression_radius_);
+    });
 }
 
 void MatchSiftData(SiftData *data1, SiftData *data2)
 {
     cusift_api_guard([&]()
-                     { MatchSiftData_private(data1, data2); });
+    {
+        MatchSiftData_private(data1, data2);
+    });
 }
 
 void FindHomography(SiftData *data, float *homography, int *num_matches, const FindHomographyOptions_t *options)
 {
     cusift_api_guard([&]()
-                     {
+    {
         FindHomography_private(
             data,
             homography,
@@ -200,6 +205,19 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
             options->max_ambiguity_,
             options->thresh_,
             options->seed_);
+        
+        // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
+        for (int i = 0; i < 9; i++)
+        {
+            if (!std::isfinite(homography[i]))
+            {
+                // Generate a more informative error message by printing the homography values
+                std::ostringstream ss;
+                //oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
+                ss << "FindHomography error '" << __FILE__ << "' line " << __LINE__ << ": homography contains non-finite values";
+                throw std::runtime_error(ss.str());
+            }
+        }
 
         ImproveHomography(
             data,
@@ -207,7 +225,8 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
             options->improve_num_loops_,
             options->improve_min_score_,
             options->improve_max_ambiguity_,
-            options->improve_thresh_); });
+            options->improve_thresh_);
+    });
 }
 
 void DeleteSiftData(SiftData *sift_data)
@@ -215,7 +234,9 @@ void DeleteSiftData(SiftData *sift_data)
     // FreeSiftData uses cudaFree directly (not safeCall), so it is
     // destructor-safe and won't throw.  We still wrap for consistency.
     cusift_api_guard([&]()
-                     { FreeSiftData(sift_data); });
+    {
+        FreeSiftData(sift_data);
+    });
 }
 
 void FreeImage(Image_t *image)
@@ -284,7 +305,7 @@ void SaveSiftData(const char *filename, const SiftData *sift_data)
 void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options)
 {
     cusift_api_guard([&]()
-                     {
+    {
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -334,13 +355,14 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
             SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
 
         // Match
-        MatchSiftData_private(sift_data1, sift_data2); });
+        MatchSiftData_private(sift_data1, sift_data2);
+    });
 }
 
 void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options)
 {
     cusift_api_guard([&]()
-                     {
+    {
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -399,13 +421,27 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
             homography_options->max_ambiguity_,
             homography_options->thresh_,
             homography_options->seed_);
+        
+        // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
+        for (int i = 0; i < 9; i++)
+        {
+            if (!std::isfinite(homography[i]))
+            {
+                // Generate a more informative error message by printing the homography values
+                std::ostringstream ss;
+                //oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
+                ss << "FindHomography error '" << __FILE__ << "' line " << __LINE__ << ": homography contains non-finite values";
+                throw std::runtime_error(ss.str());
+            }
+        }
 
         ImproveHomography(
             sift_data1, homography,
             homography_options->improve_num_loops_,
             homography_options->improve_min_score_,
             homography_options->improve_max_ambiguity_,
-            homography_options->improve_thresh_); });
+            homography_options->improve_thresh_);
+    });
 }
 
 // ── Helper: 3x3 matrix inverse (row-major) ──────────────
@@ -519,345 +555,358 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
                 Image_t *warped_image1, Image_t *warped_image2, bool useGPU)
 {
     cusift_api_guard([&]()
-                     {
-    int w1 = image1->width_, h1 = image1->height_;
-    int w2 = image2->width_, h2 = image2->height_;
-
-    // ── Step 1: Compute inv(homography) and project image2 corners ──
-    float Hinv[9];
-    if (!Invert3x3(homography, Hinv))
     {
-        fprintf(stderr, "WarpImages: homography is singular\n");
-        return;
-    }
+        int w1 = image1->width_, h1 = image1->height_;
+        int w2 = image2->width_, h2 = image2->height_;
 
-    // Image2 corners in 0-based convention: (col, row, 1)
-    float corners2[4][3] = {
-        { 0.0f,            0.0f,            1.0f },
-        { (float)(w2 - 1), 0.0f,            1.0f },
-        { (float)(w2 - 1), (float)(h2 - 1), 1.0f },
-        { 0.0f,            (float)(h2 - 1), 1.0f }
-    };
+        // ── Step 1: Compute inv(homography) and project image2 corners ──
+        float Hinv[9];
+        if (!Invert3x3(homography, Hinv))
+        {
+            fprintf(stderr, "WarpImages: homography is singular\n");
+            return;
+        }
 
-    // Project corners through inv(H) → image1's coordinate frame
-    float cx[4], cy[4];
-    for (int i = 0; i < 4; i++)
+        // Image2 corners in 0-based convention: (col, row, 1)
+        float corners2[4][3] = {
+            {0.0f, 0.0f, 1.0f},
+            {(float)(w2 - 1), 0.0f, 1.0f},
+            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
+            {0.0f, (float)(h2 - 1), 1.0f}};
+
+        // Project corners through inv(H) → image1's coordinate frame
+        float cx[4], cy[4];
+        for (int i = 0; i < 4; i++)
+        {
+            float x = corners2[i][0], y = corners2[i][1];
+            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
+            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
+            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
+        }
+
+        // ── Step 2: Determine output canvas bounding box ────
+        float uMin = 0.0f, uMax = (float)(w1 - 1);
+        float vMin = 0.0f, vMax = (float)(h1 - 1);
+        for (int i = 0; i < 4; i++)
+        {
+            uMin = std::min(uMin, cx[i]);
+            uMax = std::max(uMax, cx[i]);
+            vMin = std::min(vMin, cy[i]);
+            vMax = std::max(vMax, cy[i]);
+        }
+
+        // Integer range (MATLAB-style: ur = min:max with integer steps)
+        int u0 = (int)floorf(uMin);
+        int u1 = (int)ceilf(uMax);
+        int v0 = (int)floorf(vMin);
+        int v1 = (int)ceilf(vMax);
+
+        int outW = u1 - u0 + 1;
+        int outH = v1 - v0 + 1;
+
+        int maxW_ = 2 * std::max(image1->width_, image2->width_);
+        int maxH_ = 2 * std::max(image1->height_, image2->height_);
+        if (outW > maxW_ || outH > maxH_)
+        {
+            fprintf(stderr, "WarpImages: warped image too large (%dx%d), not attempting warp\n", outW, outH);
+            return;
+        }
+
+        if (outW <= 0 || outH <= 0)
+        {
+            fprintf(stderr, "WarpImages: invalid output size %dx%d\n", outW, outH);
+            return;
+        }
+
+        // Origin offset: canvas pixel (0,0) corresponds to 1-based coord (u0, v0)
+        float originU = (float)u0;
+        float originV = (float)v0;
+
+        // ── Step 3: Allocate output images ──────────────────
+        size_t nPixels = (size_t)outW * outH;
+        HostPtrGuard<float> out1Guard((float *)malloc(sizeof(float) * nPixels));
+        HostPtrGuard<float> out2Guard((float *)malloc(sizeof(float) * nPixels));
+        if (!out1Guard.get() || !out2Guard.get())
+        {
+            fprintf(stderr, "WarpImages: allocation failed\n");
+            return;
+        }
+
+        // Homography row-major elements
+        float H00 = homography[0], H01 = homography[1], H02 = homography[2];
+        float H10 = homography[3], H11 = homography[4], H12 = homography[5];
+        float H20 = homography[6], H21 = homography[7], H22 = homography[8];
+
+        if (useGPU)
+        {
+            // ── GPU path ────────────────────────────────────
+            DevicePtrGuard<float> d_src1Guard, d_src2Guard;
+            DevicePtrGuard<float> d_out1Guard, d_out2Guard;
+
+            size_t src1Pitch = 0, src2Pitch = 0;
+            size_t out1Pitch = 0, out2Pitch = 0;
+
+            safeCall(cudaMallocPitch(&d_src1Guard.getRef(), &src1Pitch, w1 * sizeof(float), h1));
+            safeCall(cudaMallocPitch(&d_src2Guard.getRef(), &src2Pitch, w2 * sizeof(float), h2));
+            safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Pitch, outW * sizeof(float), outH));
+            safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Pitch, outW * sizeof(float), outH));
+
+            safeCall(cudaMemcpy2D(d_src1Guard.get(), src1Pitch, image1->host_img_, w1 * sizeof(float), w1 * sizeof(float), h1, cudaMemcpyHostToDevice));
+            safeCall(cudaMemcpy2D(d_src2Guard.get(), src2Pitch, image2->host_img_, w2 * sizeof(float), w2 * sizeof(float), h2, cudaMemcpyHostToDevice));
+
+            // Strides in elements (pixels) for the kernel
+            int src1StrideElem = (int)(src1Pitch / sizeof(float));
+            int src2StrideElem = (int)(src2Pitch / sizeof(float));
+            int out1StrideElem = (int)(out1Pitch / sizeof(float));
+            // out2 stride same width as out1 since both are outW
+
+            dim3 threads(16, 16);
+            dim3 blocks((outW + threads.x - 1) / threads.x, (outH + threads.y - 1) / threads.y);
+
+            // Warp both images in a single kernel launch
+            WarpDualKernel<<<blocks, threads>>>(
+                d_src1Guard.get(), d_out1Guard.get(), w1, h1, src1StrideElem,
+                d_src2Guard.get(), d_out2Guard.get(), w2, h2, src2StrideElem,
+                outW, outH, out1StrideElem, originU, originV,
+                H00, H01, H02,
+                H10, H11, H12,
+                H20, H21, H22);
+
+            safeCall(cudaDeviceSynchronize());
+
+            safeCall(cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Pitch, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
+            safeCall(cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Pitch, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
+
+            // d_src1Guard, d_src2Guard, d_out1Guard, d_out2Guard freed automatically
+        }
+        else
+        {
+            float *out1 = out1Guard.get();
+            float *out2 = out2Guard.get();
+// ── CPU path ────────────────────────────────────
+#pragma omp parallel for schedule(static)
+            for (int y = 0; y < outH; y++)
+            {
+                float v = (float)y + originV;
+                for (int x = 0; x < outW; x++)
+                {
+                    float u = (float)x + originU;
+
+                    // Warped image1: identity (just sample at canvas coords)
+                    out1[y * outW + x] = SampleBilinear(image1->host_img_, w1, h1, u, v);
+
+                    // Warped image2: apply homography to get source coords
+                    float z = H20 * u + H21 * v + H22;
+                    float su = (H00 * u + H01 * v + H02) / z;
+                    float sv = (H10 * u + H11 * v + H12) / z;
+                    out2[y * outW + x] = SampleBilinear(image2->host_img_, w2, h2, su, sv);
+                }
+            }
+        }
+
+        // ── Step 4: Fill output structs, release ownership ──
+        warped_image1->host_img_ = out1Guard.release();
+        warped_image1->width_ = outW;
+        warped_image1->height_ = outH;
+
+        warped_image2->host_img_ = out2Guard.release();
+        warped_image2->width_ = outW;
+        warped_image2->height_ = outH;
+    }); // end cusift_api_guard for WarpImages
+}
+
+void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
+{
+    cusift_api_guard([&]()
     {
-        float x = corners2[i][0], y = corners2[i][1];
-        float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-        cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-        cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-    }
+        int w1 = image1->width_, h1 = image1->height_;
+        int w2 = image2->width_, h2 = image2->height_;
+        int maxW = std::max(w1, w2);
+        int maxH = std::max(h1, h2);
 
-    // ── Step 2: Determine output canvas bounding box ────
-    float uMin = 0.0f, uMax = (float)(w1 - 1);
-    float vMin = 0.0f, vMax = (float)(h1 - 1);
-    for (int i = 0; i < 4; i++)
-    {
-        uMin = std::min(uMin, cx[i]);
-        uMax = std::max(uMax, cx[i]);
-        vMin = std::min(vMin, cy[i]);
-        vMax = std::max(vMax, cy[i]);
-    }
+        // ── Extract SIFT features (images stay on device via CudaImageGuard) ──
+        CudaImageGuard cuda_image1;
+        CudaImageGuard cuda_image2;
 
-    // Integer range (MATLAB-style: ur = min:max with integer steps)
-    int u0 = (int)floorf(uMin);
-    int u1 = (int)ceilf(uMax);
-    int v0 = (int)floorf(vMin);
-    int v1 = (int)ceilf(vMax);
+        int minDim = std::min({w1, h1, w2, h2});
+        int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
+        int octaves = std::min(extract_options->num_octaves_, maxOctaves);
+        if (extract_options->num_octaves_ > maxOctaves)
+        {
+            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
+        }
 
-    int outW = u1 - u0 + 1;
-    int outH = v1 - v0 + 1;
+        // Limit num octaves to 7, quietly
+        octaves = std::min(octaves, 7);
+        octaves = std::max(octaves, 3); // Ensure at least 3 octaves
 
-    int maxW_ = 2 * std::max(image1->width_, image2->width_);
-    int maxH_ = 2 * std::max(image1->height_, image2->height_);
-    if (outW > maxW_ || outH > maxH_)
-    {
-        fprintf(stderr, "WarpImages: warped image too large (%dx%d), not attempting warp\n", outW, outH);
-        return;
-    }
+        SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(maxW, maxH, octaves));
 
-    if (outW <= 0 || outH <= 0)
-    {
-        fprintf(stderr, "WarpImages: invalid output size %dx%d\n", outW, outH);
-        return;
-    }
+        // Image 1
+        InitSiftData(sift_data1, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image1.get(), w1, h1,
+                           p_iAlignUp(w1, 128), false, nullptr, image1->host_img_);
+        CudaImage_Download(cuda_image1.get());
+        ExtractSift(sift_data1, cuda_image1.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->highest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data1, extract_options->scale_suppression_radius_);
 
-    // Origin offset: canvas pixel (0,0) corresponds to 1-based coord (u0, v0)
-    float originU = (float)u0;
-    float originV = (float)v0;
+        // Image 2
+        InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image2.get(), w2, h2,
+                           p_iAlignUp(w2, 128), false, nullptr, image2->host_img_);
+        CudaImage_Download(cuda_image2.get());
+        ExtractSift(sift_data2, cuda_image2.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->highest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
 
-    // ── Step 3: Allocate output images ──────────────────
-    size_t nPixels = (size_t)outW * outH;
-    HostPtrGuard<float> out1Guard((float*)malloc(sizeof(float) * nPixels));
-    HostPtrGuard<float> out2Guard((float*)malloc(sizeof(float) * nPixels));
-    if (!out1Guard.get() || !out2Guard.get())
-    {
-        fprintf(stderr, "WarpImages: allocation failed\n");
-        return;
-    }
+        // ── Match ────────────────────────────────────────────────────────────
+        MatchSiftData_private(sift_data1, sift_data2);
 
-    // Homography row-major elements
-    float H00 = homography[0], H01 = homography[1], H02 = homography[2];
-    float H10 = homography[3], H11 = homography[4], H12 = homography[5];
-    float H20 = homography[6], H21 = homography[7], H22 = homography[8];
+        // ── Find homography ─────────────────────────────────────────────────
+        FindHomography_private(
+            sift_data1, homography, num_matches,
+            homography_options->num_loops_,
+            homography_options->min_score_,
+            homography_options->max_ambiguity_,
+            homography_options->thresh_,
+            homography_options->seed_);
+        
+        // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
+        for (int i = 0; i < 9; i++)
+        {
+            if (!std::isfinite(homography[i]))
+            {
+                // Generate a more informative error message by printing the homography values
+                std::ostringstream ss;
+                //oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
+                ss << "FindHomography error '" << __FILE__ << "' line " << __LINE__ << ": homography contains non-finite values";
+                throw std::runtime_error(ss.str());
+            }
+        }
 
-    if (useGPU)
-    {
-        // ── GPU path ────────────────────────────────────
-        DevicePtrGuard<float> d_src1Guard, d_src2Guard;
+        ImproveHomography(
+            sift_data1, homography,
+            homography_options->improve_num_loops_,
+            homography_options->improve_min_score_,
+            homography_options->improve_max_ambiguity_,
+            homography_options->improve_thresh_);
+
+        // ── Compute canvas bounding box ─────────────────────────────────────
+        float Hinv[9];
+        if (!Invert3x3(homography, Hinv))
+        {
+            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: homography is singular\n");
+            return;
+        }
+
+        float corners2[4][3] = {
+            {0.0f, 0.0f, 1.0f},
+            {(float)(w2 - 1), 0.0f, 1.0f},
+            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
+            {0.0f, (float)(h2 - 1), 1.0f}};
+
+        float cx[4], cy[4];
+        for (int i = 0; i < 4; i++)
+        {
+            float x = corners2[i][0], y = corners2[i][1];
+            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
+            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
+            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
+        }
+
+        float uMin = 0.0f, uMax = (float)(w1 - 1);
+        float vMin = 0.0f, vMax = (float)(h1 - 1);
+        for (int i = 0; i < 4; i++)
+        {
+            uMin = std::min(uMin, cx[i]);
+            uMax = std::max(uMax, cx[i]);
+            vMin = std::min(vMin, cy[i]);
+            vMax = std::max(vMax, cy[i]);
+        }
+
+        int u0 = (int)floorf(uMin);
+        int u1 = (int)ceilf(uMax);
+        int v0 = (int)floorf(vMin);
+        int v1 = (int)ceilf(vMax);
+
+        int outW = u1 - u0 + 1;
+        int outH = v1 - v0 + 1;
+        float originU = (float)u0;
+        float originV = (float)v0;
+
+        int maxW_ = 2 * std::max(image1->width_, image2->width_);
+        int maxH_ = 2 * std::max(image1->height_, image2->height_);
+        if (outW > maxW_ || outH > maxH_)
+        {
+            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: warped image too large (%dx%d), not attempting warp\n", outW, outH);
+            return;
+        }
+        if (outW <= 0 || outH <= 0)
+        {
+            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: invalid output size %dx%d\n", outW, outH);
+            return;
+        }
+
+        // ── Warp on GPU — source data is already device-resident ────────────
+        // Reuse the CudaImageGuard device pointers (no extra upload needed).
+        float *d_src1 = cuda_image1.get()->d_data;
+        float *d_src2 = cuda_image2.get()->d_data;
+        int src1Pitch = cuda_image1.get()->pitch;
+        int src2Pitch = cuda_image2.get()->pitch;
+
         DevicePtrGuard<float> d_out1Guard, d_out2Guard;
 
-        size_t src1Pitch = 0, src2Pitch = 0;
-        size_t out1Pitch = 0, out2Pitch = 0;
+        size_t out1Stride = 0;
+        size_t out2Stride = 0;
 
-        safeCall(cudaMallocPitch(&d_src1Guard.getRef(), &src1Pitch, w1 * sizeof(float), h1));
-        safeCall(cudaMallocPitch(&d_src2Guard.getRef(), &src2Pitch, w2 * sizeof(float), h2));
-        safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Pitch, outW * sizeof(float), outH));
-        safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Pitch, outW * sizeof(float), outH));
+        safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Stride, outW * sizeof(float), outH));
+        safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Stride, outW * sizeof(float), outH));
 
-        safeCall(cudaMemcpy2D(d_src1Guard.get(), src1Pitch, image1->host_img_, w1 * sizeof(float), w1 * sizeof(float), h1, cudaMemcpyHostToDevice));
-        safeCall(cudaMemcpy2D(d_src2Guard.get(), src2Pitch, image2->host_img_, w2 * sizeof(float), w2 * sizeof(float), h2, cudaMemcpyHostToDevice));
-
-        // Strides in elements (pixels) for the kernel
-        int src1StrideElem = (int)(src1Pitch / sizeof(float));
-        int src2StrideElem = (int)(src2Pitch / sizeof(float));
-        int out1StrideElem = (int)(out1Pitch / sizeof(float));
-        // out2 stride same width as out1 since both are outW
+        float H00 = homography[0], H01 = homography[1], H02 = homography[2];
+        float H10 = homography[3], H11 = homography[4], H12 = homography[5];
+        float H20 = homography[6], H21 = homography[7], H22 = homography[8];
 
         dim3 threads(16, 16);
-        dim3 blocks((outW + threads.x - 1) / threads.x, (outH + threads.y - 1) / threads.y);
+        dim3 blocks((outW + threads.x - 1) / threads.x,
+                    (outH + threads.y - 1) / threads.y);
 
         // Warp both images in a single kernel launch
         WarpDualKernel<<<blocks, threads>>>(
-            d_src1Guard.get(), d_out1Guard.get(), w1, h1, src1StrideElem,
-            d_src2Guard.get(), d_out2Guard.get(), w2, h2, src2StrideElem,
-            outW, outH, out1StrideElem, originU, originV,
+            d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
+            d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
+            outW, outH, out1Stride / sizeof(float), originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
 
         safeCall(cudaDeviceSynchronize());
 
-        safeCall(cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Pitch, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
-        safeCall(cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Pitch, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
-
-        // d_src1Guard, d_src2Guard, d_out1Guard, d_out2Guard freed automatically
-    }
-    else
-    {
-        float* out1 = out1Guard.get();
-        float* out2 = out2Guard.get();
-// ── CPU path ────────────────────────────────────
-#pragma omp parallel for schedule(dynamic, 16)
-        for (int y = 0; y < outH; y++)
+        // ── Copy results to host and fill output structs ────────────────────
+        size_t nPixels = (size_t)outW * outH;
+        HostPtrGuard<float> out1Guard((float *)malloc(sizeof(float) * nPixels));
+        HostPtrGuard<float> out2Guard((float *)malloc(sizeof(float) * nPixels));
+        if (!out1Guard.get() || !out2Guard.get())
         {
-            float v = (float)y + originV;
-            for (int x = 0; x < outW; x++)
-            {
-                float u = (float)x + originU;
-
-                // Warped image1: identity (just sample at canvas coords)
-                out1[y * outW + x] = SampleBilinear(image1->host_img_, w1, h1, u, v);
-
-                // Warped image2: apply homography to get source coords
-                float z = H20 * u + H21 * v + H22;
-                float su = (H00 * u + H01 * v + H02) / z;
-                float sv = (H10 * u + H11 * v + H12) / z;
-                out2[y * outW + x] = SampleBilinear(image2->host_img_, w2, h2, su, sv);
-            }
+            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: host allocation failed\n");
+            return;
         }
-    }
 
-    // ── Step 4: Fill output structs, release ownership ──
-    warped_image1->host_img_ = out1Guard.release();
-    warped_image1->width_    = outW;
-    warped_image1->height_   = outH;
+        safeCall(cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
+        safeCall(cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
 
-    warped_image2->host_img_ = out2Guard.release();
-    warped_image2->width_    = outW;
-    warped_image2->height_   = outH; }); // end cusift_api_guard for WarpImages
-}
+        warped_image1->host_img_ = out1Guard.release();
+        warped_image1->width_ = outW;
+        warped_image1->height_ = outH;
 
-void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
-{
-    cusift_api_guard([&]()
-                     {
-    int w1 = image1->width_, h1 = image1->height_;
-    int w2 = image2->width_, h2 = image2->height_;
-    int maxW = std::max(w1, w2);
-    int maxH = std::max(h1, h2);
-
-    // ── Extract SIFT features (images stay on device via CudaImageGuard) ──
-    CudaImageGuard cuda_image1;
-    CudaImageGuard cuda_image2;
-
-    int minDim = std::min({w1, h1, w2, h2});
-    int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
-    int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-    if (extract_options->num_octaves_ > maxOctaves)
-    {
-        std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-    }
-
-    // Limit num octaves to 7, quietly
-    octaves = std::min(octaves, 7);
-    octaves = std::max(octaves, 3); // Ensure at least 3 octaves
-
-    SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(maxW, maxH, octaves));
-
-    // Image 1
-    InitSiftData(sift_data1, extract_options->max_keypoints_, true, true);
-    CudaImage_Allocate(cuda_image1.get(), w1, h1,
-                       p_iAlignUp(w1, 128), false, nullptr, image1->host_img_);
-    CudaImage_Download(cuda_image1.get());
-    ExtractSift(sift_data1, cuda_image1.get(), octaves,
-                extract_options->init_blur_, extract_options->thresh_,
-                extract_options->lowest_scale_, extract_options->highest_scale_, extract_options->edge_thresh_,
-                tempMemory.get());
-    if (extract_options->scale_suppression_radius_ > 0.0f)
-        SuppressEmbeddedPoints(sift_data1, extract_options->scale_suppression_radius_);
-
-    // Image 2
-    InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
-    CudaImage_Allocate(cuda_image2.get(), w2, h2,
-                       p_iAlignUp(w2, 128), false, nullptr, image2->host_img_);
-    CudaImage_Download(cuda_image2.get());
-    ExtractSift(sift_data2, cuda_image2.get(), octaves,
-                extract_options->init_blur_, extract_options->thresh_,
-                extract_options->lowest_scale_, extract_options->highest_scale_, extract_options->edge_thresh_,
-                tempMemory.get());
-    if (extract_options->scale_suppression_radius_ > 0.0f)
-        SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
-
-    // ── Match ────────────────────────────────────────────────────────────
-    MatchSiftData_private(sift_data1, sift_data2);
-
-    // ── Find homography ─────────────────────────────────────────────────
-    FindHomography_private(
-        sift_data1, homography, num_matches,
-        homography_options->num_loops_,
-        homography_options->min_score_,
-        homography_options->max_ambiguity_,
-        homography_options->thresh_,
-        homography_options->seed_);
-
-    ImproveHomography(
-        sift_data1, homography,
-        homography_options->improve_num_loops_,
-        homography_options->improve_min_score_,
-        homography_options->improve_max_ambiguity_,
-        homography_options->improve_thresh_);
-
-    // ── Compute canvas bounding box ─────────────────────────────────────
-    float Hinv[9];
-    if (!Invert3x3(homography, Hinv))
-    {
-        fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: homography is singular\n");
-        return;
-    }
-
-    float corners2[4][3] = {
-        { 0.0f,            0.0f,            1.0f },
-        { (float)(w2 - 1), 0.0f,            1.0f },
-        { (float)(w2 - 1), (float)(h2 - 1), 1.0f },
-        { 0.0f,            (float)(h2 - 1), 1.0f }
-    };
-
-    float cx[4], cy[4];
-    for (int i = 0; i < 4; i++)
-    {
-        float x = corners2[i][0], y = corners2[i][1];
-        float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-        cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-        cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-    }
-
-    float uMin = 0.0f, uMax = (float)(w1 - 1);
-    float vMin = 0.0f, vMax = (float)(h1 - 1);
-    for (int i = 0; i < 4; i++)
-    {
-        uMin = std::min(uMin, cx[i]);
-        uMax = std::max(uMax, cx[i]);
-        vMin = std::min(vMin, cy[i]);
-        vMax = std::max(vMax, cy[i]);
-    }
-
-    int u0 = (int)floorf(uMin);
-    int u1 = (int)ceilf(uMax);
-    int v0 = (int)floorf(vMin);
-    int v1 = (int)ceilf(vMax);
-
-    int outW = u1 - u0 + 1;
-    int outH = v1 - v0 + 1;
-    float originU = (float)u0;
-    float originV = (float)v0;
-
-    int maxW_ = 2 * std::max(image1->width_, image2->width_);
-    int maxH_ = 2 * std::max(image1->height_, image2->height_);
-    if (outW > maxW_ || outH > maxH_)
-    {
-        fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: warped image too large (%dx%d), not attempting warp\n", outW, outH);
-        return;
-    }
-    if (outW <= 0 || outH <= 0)
-    {
-        fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: invalid output size %dx%d\n", outW, outH);
-        return;
-    }
-
-    // ── Warp on GPU — source data is already device-resident ────────────
-    // Reuse the CudaImageGuard device pointers (no extra upload needed).
-    float* d_src1 = cuda_image1.get()->d_data;
-    float* d_src2 = cuda_image2.get()->d_data;
-    int src1Pitch = cuda_image1.get()->pitch;
-    int src2Pitch = cuda_image2.get()->pitch;
-
-    DevicePtrGuard<float> d_out1Guard, d_out2Guard;
-
-    size_t out1Stride = 0;
-    size_t out2Stride = 0;
-
-    safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Stride, outW * sizeof(float), outH));
-    safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Stride, outW * sizeof(float), outH));
-
-    float H00 = homography[0], H01 = homography[1], H02 = homography[2];
-    float H10 = homography[3], H11 = homography[4], H12 = homography[5];
-    float H20 = homography[6], H21 = homography[7], H22 = homography[8];
-
-    dim3 threads(16, 16);
-    dim3 blocks((outW + threads.x - 1) / threads.x,
-                (outH + threads.y - 1) / threads.y);
-
-    // Warp both images in a single kernel launch
-    WarpDualKernel<<<blocks, threads>>>(
-        d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
-        d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
-        outW, outH, out1Stride / sizeof(float), originU, originV,
-        H00, H01, H02,
-        H10, H11, H12,
-        H20, H21, H22);
-
-    safeCall(cudaDeviceSynchronize());
-
-    // ── Copy results to host and fill output structs ────────────────────
-    size_t nPixels = (size_t)outW * outH;
-    HostPtrGuard<float> out1Guard((float*)malloc(sizeof(float) * nPixels));
-    HostPtrGuard<float> out2Guard((float*)malloc(sizeof(float) * nPixels));
-    if (!out1Guard.get() || !out2Guard.get())
-    {
-        fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: host allocation failed\n");
-        return;
-    }
-
-    safeCall(cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
-    safeCall(cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
-
-    warped_image1->host_img_ = out1Guard.release();
-    warped_image1->width_    = outW;
-    warped_image1->height_   = outH;
-
-    warped_image2->host_img_ = out2Guard.release();
-    warped_image2->width_    = outW;
-    warped_image2->height_   = outH; }); // end cusift_api_guard for ExtractAndMatchAndFindHomographyAndWarp
+        warped_image2->host_img_ = out2Guard.release();
+        warped_image2->width_ = outW;
+        warped_image2->height_ = outH;
+    }); // end cusift_api_guard for ExtractAndMatchAndFindHomographyAndWarp
 }
