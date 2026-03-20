@@ -17,6 +17,15 @@
 #include <string>
 #include <omp.h>
 
+#define ERROR(msg) __throw_error(__FILE__, __LINE__, msg)
+
+static void __throw_error(const char *file, int line, const char *msg)
+{
+    std::ostringstream ss;
+    ss << "\nError in file '" << file << "' in line " << line << " : " << msg;
+    throw std::runtime_error(ss.str());
+}
+
 static int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
 
 static bool Invert3x3(const float *M, float *out);
@@ -207,15 +216,11 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
             options->seed_);
         
         // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
-        for (int i = 0; i < 9; i++)
+        for (int i = 0; i < 8; i++)
         {
             if (!std::isfinite(homography[i]))
             {
-                // Generate a more informative error message by printing the homography values
-                std::ostringstream ss;
-                //oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
-                ss << "FindHomography error '" << __FILE__ << "' line " << __LINE__ << ": homography contains non-finite values";
-                throw std::runtime_error(ss.str());
+                ERROR("Homograpy contains non-finite values");
             }
         }
 
@@ -423,15 +428,11 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
             homography_options->seed_);
         
         // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
-        for (int i = 0; i < 9; i++)
+        for (int i = 0; i < 8; i++)
         {
             if (!std::isfinite(homography[i]))
             {
-                // Generate a more informative error message by printing the homography values
-                std::ostringstream ss;
-                //oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
-                ss << "FindHomography error '" << __FILE__ << "' line " << __LINE__ << ": homography contains non-finite values";
-                throw std::runtime_error(ss.str());
+                ERROR("Homograpy contains non-finite values");
             }
         }
 
@@ -563,8 +564,7 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
         float Hinv[9];
         if (!Invert3x3(homography, Hinv))
         {
-            fprintf(stderr, "WarpImages: homography is singular\n");
-            return;
+            ERROR("Homography is too close to singular to invert");
         }
 
         // Image2 corners in 0-based convention: (col, row, 1)
@@ -608,14 +608,16 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
         int maxH_ = 2 * std::max(image1->height_, image2->height_);
         if (outW > maxW_ || outH > maxH_)
         {
-            fprintf(stderr, "WarpImages: warped image too large (%dx%d), not attempting warp\n", outW, outH);
-            return;
+            std::stringstream ss;
+            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
+            ERROR(ss.str().c_str());
         }
 
         if (outW <= 0 || outH <= 0)
         {
-            fprintf(stderr, "WarpImages: invalid output size %dx%d\n", outW, outH);
-            return;
+            std::stringstream ss;
+            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
+            ERROR(ss.str().c_str());
         }
 
         // Origin offset: canvas pixel (0,0) corresponds to 1-based coord (u0, v0)
@@ -628,8 +630,7 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
         HostPtrGuard<float> out2Guard((float *)malloc(sizeof(float) * nPixels));
         if (!out1Guard.get() || !out2Guard.get())
         {
-            fprintf(stderr, "WarpImages: allocation failed\n");
-            return;
+            ERROR("Warping: host return image allocation failed");
         }
 
         // Homography row-major elements
@@ -779,15 +780,11 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
             homography_options->seed_);
         
         // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
-        for (int i = 0; i < 9; i++)
+        for (int i = 0; i < 8; i++)
         {
             if (!std::isfinite(homography[i]))
             {
-                // Generate a more informative error message by printing the homography values
-                std::ostringstream ss;
-                //oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
-                ss << "FindHomography error '" << __FILE__ << "' line " << __LINE__ << ": homography contains non-finite values";
-                throw std::runtime_error(ss.str());
+                ERROR("Homograpy contains non-finite values");
             }
         }
 
@@ -802,8 +799,7 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         float Hinv[9];
         if (!Invert3x3(homography, Hinv))
         {
-            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: homography is singular\n");
-            return;
+            ERROR("Homography is too close to singular to invert");
         }
 
         float corners2[4][3] = {
@@ -845,13 +841,15 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         int maxH_ = 2 * std::max(image1->height_, image2->height_);
         if (outW > maxW_ || outH > maxH_)
         {
-            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: warped image too large (%dx%d), not attempting warp\n", outW, outH);
-            return;
+            std::stringstream ss;
+            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
+            ERROR(ss.str().c_str());
         }
         if (outW <= 0 || outH <= 0)
         {
-            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: invalid output size %dx%d\n", outW, outH);
-            return;
+            std::stringstream ss;
+            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
+            ERROR(ss.str().c_str());
         }
 
         // ── Warp on GPU — source data is already device-resident ────────────
@@ -894,8 +892,7 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         HostPtrGuard<float> out2Guard((float *)malloc(sizeof(float) * nPixels));
         if (!out1Guard.get() || !out2Guard.get())
         {
-            fprintf(stderr, "ExtractAndMatchAndFindHomographyAndWarp: host allocation failed\n");
-            return;
+            ERROR("Warping: return image host allocation failed");
         }
 
         safeCall(cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
