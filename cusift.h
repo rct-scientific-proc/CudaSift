@@ -253,6 +253,28 @@ extern "C"
         float scale_suppression_radius_;  /**< Scale-NMS radius multiplier (0 = disabled). */
     } ExtractSiftOptions_t;
 
+    /**
+     * @brief Model type for geometric estimation.
+     *
+     * CUSIFT_MODEL_HOMOGRAPHY (0):
+     *     Full 8-DOF projective homography estimated from 4-point
+     *     correspondences via DLT + RANSAC.  Suitable for any planar
+     *     scene or camera motion.
+     *
+     * CUSIFT_MODEL_SIMILARITY (1):
+     *     4-DOF similarity transform (rotation + uniform scale +
+     *     translation) estimated from 2-point correspondences.
+     *     Much faster convergence when the scene is dominated by
+     *     translation with minimal rotation/scale and no shear or
+     *     perspective.  The resulting homography matrix has the form:
+     *         [ a  -b  tx ]
+     *         [ b   a  ty ]
+     *         [ 0   0   1 ]
+     *     where a = s*cos(theta), b = s*sin(theta).
+     */
+#define CUSIFT_MODEL_HOMOGRAPHY  0
+#define CUSIFT_MODEL_SIMILARITY  1
+
     typedef struct
     {
         int num_loops_;                 /**< Number of RANSAC iterations. */
@@ -266,6 +288,8 @@ extern "C"
         float improve_thresh_;          /**< Inlier distance threshold for refinement. */
 
         unsigned int seed_; /**< Seed for the PRNG that generates random 4-point samples in RANSAC. 0 = non-deterministic (random_device) */
+
+        int model_type_;    /**< CUSIFT_MODEL_HOMOGRAPHY (0) or CUSIFT_MODEL_SIMILARITY (1). Default: 0. */
     } FindHomographyOptions_t;
 
     /**

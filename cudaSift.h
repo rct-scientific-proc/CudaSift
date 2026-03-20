@@ -19,6 +19,7 @@ void FreeSiftData(SiftData *data);
 void SuppressEmbeddedPoints(SiftData *data, float radiusScale);
 double MatchSiftData_private(SiftData *data1, SiftData *data2);
 double FindHomography_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh, unsigned int seed);
+double FindSimilarity_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh, unsigned int seed);
 
 
 #ifdef __cplusplus

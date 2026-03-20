@@ -28,6 +28,26 @@ static void __throw_error(const char *file, int line, const char *msg)
 
 static int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
 
+// Dispatch to either full homography or similarity RANSAC based on model_type_
+static void FindGeometricModel(SiftData *data, float *homography, int *numMatches,
+                                const FindHomographyOptions_t *opts)
+{
+    if (opts->model_type_ == CUSIFT_MODEL_SIMILARITY)
+    {
+        FindSimilarity_private(
+            data, homography, numMatches,
+            opts->num_loops_, opts->min_score_, opts->max_ambiguity_,
+            opts->thresh_, opts->seed_);
+    }
+    else
+    {
+        FindHomography_private(
+            data, homography, numMatches,
+            opts->num_loops_, opts->min_score_, opts->max_ambiguity_,
+            opts->thresh_, opts->seed_);
+    }
+}
+
 static bool Invert3x3(const float *M, float *out);
 static inline float SampleBilinear(const float *img, int w, int h, float x, float y);
 static __global__ void WarpDualKernel(
@@ -205,15 +225,11 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
 {
     cusift_api_guard([&]()
     {
-        FindHomography_private(
+        FindGeometricModel(
             data,
             homography,
             num_matches,
-            options->num_loops_,
-            options->min_score_,
-            options->max_ambiguity_,
-            options->thresh_,
-            options->seed_);
+            options);
         
         // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
         for (int i = 0; i < 8; i++)
@@ -432,13 +448,9 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
         // Match
         MatchSiftData_private(sift_data1, sift_data2);
 
-        FindHomography_private(
+        FindGeometricModel(
             sift_data1, homography, num_matches,
-            homography_options->num_loops_,
-            homography_options->min_score_,
-            homography_options->max_ambiguity_,
-            homography_options->thresh_,
-            homography_options->seed_);
+            homography_options);
         
         // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
         for (int i = 0; i < 8; i++)
@@ -903,13 +915,9 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         MatchSiftData_private(sift_data1, sift_data2);
 
         // ── Find homography ─────────────────────────────────────────────────
-        FindHomography_private(
+        FindGeometricModel(
             sift_data1, homography, num_matches,
-            homography_options->num_loops_,
-            homography_options->min_score_,
-            homography_options->max_ambiguity_,
-            homography_options->thresh_,
-            homography_options->seed_);
+            homography_options);
         
         // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
         for (int i = 0; i < 8; i++)
@@ -1094,13 +1102,9 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
         MatchSiftData_private(sift_data1, sift_data2);
 
         // ── Find homography ─────────────────────────────────────────────────
-        FindHomography_private(
+        FindGeometricModel(
             sift_data1, homography, num_matches,
-            homography_options->num_loops_,
-            homography_options->min_score_,
-            homography_options->max_ambiguity_,
-            homography_options->thresh_,
-            homography_options->seed_);
+            homography_options);
         
         for (int i = 0; i < 8; i++)
         {
@@ -1302,10 +1306,17 @@ size_t EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions
     int numLoops = ((options->num_loops_ + 15) / 16) * 16;
 
     size_t coordBytes    = 4 * sizeof(float) * numPtsUp;
-    size_t randPtsBytes  = 4 * sizeof(int)   * numLoops;
-    size_t homoBytes     = 8 * sizeof(float) * numLoops;
 
-    return siftBytes + coordBytes + randPtsBytes + homoBytes;
+    size_t randPtsBytes, modelBytes;
+    if (options->model_type_ == CUSIFT_MODEL_SIMILARITY) {
+        randPtsBytes = 2 * sizeof(int)   * numLoops;
+        modelBytes   = 4 * sizeof(float) * numLoops;
+    } else {
+        randPtsBytes = 4 * sizeof(int)   * numLoops;
+        modelBytes   = 8 * sizeof(float) * numLoops;
+    }
+
+    return siftBytes + coordBytes + randPtsBytes + modelBytes;
 }
 
 size_t EstimateVramWarpImages(int image_width1, int image_height1, int image_width2, int image_height2)

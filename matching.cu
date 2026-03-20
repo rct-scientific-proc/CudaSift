@@ -455,6 +455,229 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     return 0.0;
 }
 
+//================= Similarity (2-point) RANSAC =====================//
+
+// Compute a 4-DOF similarity from 2 correspondences:
+//   x2 = a*x1 - b*y1 + tx
+//   y2 = b*x1 + a*y1 + ty
+// Stored as 4 floats per hypothesis: [a, b, tx, ty]
+__global__ void ComputeSimilarities(float *coord, int *randPts, float *sims,
+                                     int numPts)
+{
+    const int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    const int numLoops = blockDim.x * gridDim.x;
+
+    int p0 = randPts[0 * numLoops + idx];
+    int p1 = randPts[1 * numLoops + idx];
+
+    float x1a = coord[p0 + 0 * numPts];
+    float y1a = coord[p0 + 1 * numPts];
+    float x2a = coord[p0 + 2 * numPts];
+    float y2a = coord[p0 + 3 * numPts];
+
+    float x1b = coord[p1 + 0 * numPts];
+    float y1b = coord[p1 + 1 * numPts];
+    float x2b = coord[p1 + 2 * numPts];
+    float y2b = coord[p1 + 3 * numPts];
+
+    // Solve 2x2 system:  [dx1  -dy1] [a]   [dx2]
+    //                     [dy1   dx1] [b] = [dy2]
+    // where dx1 = x1b-x1a, dy1 = y1b-y1a, dx2 = x2b-x2a, dy2 = y2b-y2a
+    float dx1 = x1b - x1a;
+    float dy1 = y1b - y1a;
+    float dx2 = x2b - x2a;
+    float dy2 = y2b - y2a;
+
+    float det = __fmaf_rz(dx1, dx1, __fmul_rz(dy1, dy1));
+    float inv_det = (det > 1e-12f) ? __frcp_rn(det) : 0.0f;
+
+    float a  = __fmul_rz(__fmaf_rz(dx1, dx2, __fmul_rz(dy1, dy2)), inv_det);
+    float b  = __fmul_rz(__fmaf_rz(dx1, dy2, -__fmul_rz(dy1, dx2)), inv_det);
+    float tx = __fmaf_rz(-a, x1a, __fmaf_rz(b, y1a, x2a));
+    float ty = __fmaf_rz(-b, x1a, __fmaf_rz(-a, y1a, y2a));
+
+    sims[0 * numLoops + idx] = a;
+    sims[1 * numLoops + idx] = b;
+    sims[2 * numLoops + idx] = tx;
+    sims[3 * numLoops + idx] = ty;
+}
+
+#define TESTSIM_TESTS 16
+#define TESTSIM_LOOPS 16
+
+// Test similarity hypotheses against all correspondences
+__global__ void TestSimilarities(float *d_coord, float *d_sims,
+                                  int *d_counts, int numPts, float thresh2)
+{
+    __shared__ float sim[4 * TESTSIM_LOOPS];
+    __shared__ int cnts[TESTSIM_TESTS * TESTSIM_LOOPS];
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int idx = blockIdx.y * blockDim.y + tx;
+    const int numLoops = blockDim.y * gridDim.y;
+
+    // Load 4 similarity params per hypothesis into shared memory
+    if (ty < 4 && tx < TESTSIM_LOOPS)
+        sim[tx * 4 + ty] = d_sims[idx + ty * numLoops];
+    __syncthreads();
+
+    float a  = sim[ty * 4 + 0];
+    float b  = sim[ty * 4 + 1];
+    float stx = sim[ty * 4 + 2];
+    float sty = sim[ty * 4 + 3];
+
+    int cnt = 0;
+    for (int i = tx; i < numPts; i += TESTSIM_TESTS)
+    {
+        float x1 = d_coord[i + 0 * numPts];
+        float y1 = d_coord[i + 1 * numPts];
+        float x2 = d_coord[i + 2 * numPts];
+        float y2 = d_coord[i + 3 * numPts];
+        float px = __fmaf_rz(a, x1, __fmaf_rz(-b, y1, stx));
+        float py = __fmaf_rz(b, x1, __fmaf_rz(a, y1, sty));
+        float errx = x2 - px;
+        float erry = y2 - py;
+        float err2 = __fmaf_rz(errx, errx, __fmul_rz(erry, erry));
+        if (err2 < thresh2)
+            cnt++;
+    }
+
+    int kty = TESTSIM_TESTS * ty;
+    cnts[kty + tx] = cnt;
+    __syncthreads();
+    int len = TESTSIM_TESTS / 2;
+    while (len > 0)
+    {
+        if (tx < len)
+            cnts[kty + tx] += cnts[kty + tx + len];
+        len /= 2;
+        __syncthreads();
+    }
+    if (tx < TESTSIM_LOOPS && ty == 0)
+        d_counts[idx] = cnts[TESTSIM_TESTS * tx];
+    __syncthreads();
+}
+
+// Generate 2 distinct random point indices per iteration
+static void GenerateRandomSamples2(int *h_randPts, int numLoops, const int *validPts, int numValid, unsigned int seed = 0)
+{
+    std::mt19937 rng(seed ? seed : std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, numValid - 1);
+
+    for (int i = 0; i < numLoops; i++)
+    {
+        int p1 = dist(rng);
+        int p2 = dist(rng);
+        while (p2 == p1)
+            p2 = dist(rng);
+        h_randPts[i + 0 * numLoops] = validPts[p1];
+        h_randPts[i + 1 * numLoops] = validPts[p2];
+    }
+}
+
+double FindSimilarity_private(SiftData *data, float *homography, int *numMatches,
+                               int numLoops, float minScore, float maxAmbiguity,
+                               float thresh, unsigned int seed)
+{
+    *numMatches = 0;
+    for (int i = 0; i < 9; i++)
+        homography[i] = std::nanf("");
+    homography[8] = 1.0f;
+    if (data->d_data == NULL)
+        return 0.0f;
+    SiftPoint *d_sift = data->d_data;
+    numLoops = iDivUp(numLoops, 16) * 16;
+    int numPts = data->numPts;
+    if (numPts < 4)
+        return 0.0f;
+    int numPtsUp = iDivUp(numPts, 16) * 16;
+    int randSize = 2 * sizeof(int) * numLoops; // 2 points per sample
+    int szFl = sizeof(float);
+    int szPt = sizeof(SiftPoint);
+
+    DevicePtrGuard<float> d_coord_guard;
+    DevicePtrGuard<int>   d_randPts_guard;
+    DevicePtrGuard<float> d_sims_guard;
+    safeCall(cudaMalloc((void **)&d_coord_guard.getRef(), 4 * sizeof(float) * numPtsUp));
+    safeCall(cudaMalloc((void **)&d_randPts_guard.getRef(), randSize));
+    safeCall(cudaMalloc((void **)&d_sims_guard.getRef(), 4 * sizeof(float) * numLoops)); // [a,b,tx,ty] per hypothesis
+    float *d_coord = d_coord_guard.get();
+    int   *d_randPts = d_randPts_guard.get();
+    float *d_sims = d_sims_guard.get();
+
+    HostPtrGuard<int>   h_randPts_guard((int *)malloc(randSize));
+    HostPtrGuard<float> h_scores_guard((float *)malloc(sizeof(float) * numPtsUp));
+    HostPtrGuard<float> h_ambiguities_guard((float *)malloc(sizeof(float) * numPtsUp));
+    int *h_randPts = h_randPts_guard.get();
+    float *h_scores = h_scores_guard.get();
+    float *h_ambiguities = h_ambiguities_guard.get();
+
+    safeCall(cudaMemcpy2D(h_scores, szFl, &d_sift[0].score, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
+    safeCall(cudaMemcpy2D(h_ambiguities, szFl, &d_sift[0].ambiguity, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
+
+    HostPtrGuard<int> validPts_guard((int *)malloc(sizeof(int) * numPts));
+    int *validPts = validPts_guard.get();
+    int numValid = 0;
+    for (int i = 0; i < numPts; i++)
+    {
+        if (h_scores[i] > minScore && h_ambiguities[i] < maxAmbiguity)
+            validPts[numValid++] = i;
+    }
+
+    if (numValid >= 4)
+    {
+        GenerateRandomSamples2(h_randPts, numLoops, validPts, numValid, seed);
+        safeCall(cudaMemcpy(d_randPts, h_randPts, randSize, cudaMemcpyHostToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[0 * numPtsUp], szFl, &d_sift[0].xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[1 * numPtsUp], szFl, &d_sift[0].ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[2 * numPtsUp], szFl, &d_sift[0].match_xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[3 * numPtsUp], szFl, &d_sift[0].match_ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+
+        ComputeSimilarities<<<numLoops / 16, 16>>>(d_coord, d_randPts, d_sims, numPtsUp);
+        safeCall(cudaDeviceSynchronize());
+        checkMsg("ComputeSimilarities() execution failed\n");
+
+        dim3 blocks(1, numLoops / TESTSIM_LOOPS);
+        dim3 threads(TESTSIM_TESTS, TESTSIM_LOOPS);
+        TestSimilarities<<<blocks, threads>>>(d_coord, d_sims, d_randPts, numPtsUp, thresh * thresh);
+        safeCall(cudaDeviceSynchronize());
+        checkMsg("TestSimilarities() execution failed\n");
+
+        safeCall(cudaMemcpy(h_randPts, d_randPts, sizeof(int) * numLoops, cudaMemcpyDeviceToHost));
+        int maxIndex = -1, maxCount = -1;
+        for (int i = 0; i < numLoops; i++)
+            if (h_randPts[i] > maxCount)
+            {
+                maxCount = h_randPts[i];
+                maxIndex = i;
+            }
+        *numMatches = maxCount;
+
+        // Read back the best similarity [a, b, tx, ty] and form the homography
+        float best_sim[4];
+        for (int j = 0; j < 4; j++)
+        {
+            safeCall(cudaMemcpy(&best_sim[j], &d_sims[j * numLoops + maxIndex], sizeof(float), cudaMemcpyDeviceToHost));
+        }
+
+        // Pack into 3x3 homography (row-major):
+        //   [ a  -b  tx ]
+        //   [ b   a  ty ]
+        //   [ 0   0   1 ]
+        homography[0] = best_sim[0];   // a
+        homography[1] = -best_sim[1];  // -b
+        homography[2] = best_sim[2];   // tx
+        homography[3] = best_sim[1];   // b
+        homography[4] = best_sim[0];   // a
+        homography[5] = best_sim[3];   // ty
+        homography[6] = 0.0f;
+        homography[7] = 0.0f;
+        homography[8] = 1.0f;
+    }
+
+    return 0.0;
+}
+
 // Keep
 double MatchSiftData_private(SiftData *data1, SiftData *data2)
 {

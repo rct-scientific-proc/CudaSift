@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <chrono>
 
-// ── Helpers ─────────────────────────────────────────────
+// -- Helpers ---------------------------------------------
 
 static int load_image_to_grayscale_float(const char* filename, std::vector<float>& image, int& width, int& height)
 {
@@ -106,6 +106,7 @@ static FindHomographyOptions_t default_homography_options()
     opts.improve_max_ambiguity_ = 1.0f;
     opts.improve_thresh_ = 2.0f;
     opts.seed_ = 42;
+    opts.model_type_ = CUSIFT_MODEL_HOMOGRAPHY;
     return opts;
 }
 
@@ -153,11 +154,12 @@ static std::string fmt_throughput(double gb_per_sec)
     return buf;
 }
 
-// ── Per-resolution benchmark result ─────────────────────
+// -- Per-resolution benchmark result ---------------------
 
 struct BenchResult
 {
     std::string label;
+    int model_type;
     int w1, h1, w2, h2;
 
     double extract_ms;
@@ -183,27 +185,29 @@ struct BenchResult
     bool ok;
 };
 
-static BenchResult benchmark(const char* label, const Image_t& im1, const Image_t& im2)
+static BenchResult benchmark(const char* label, const Image_t& im1, const Image_t& im2, int model_type = CUSIFT_MODEL_HOMOGRAPHY)
 {
     using Clock = std::chrono::high_resolution_clock;
 
     BenchResult r{};
     r.label = label;
+    r.model_type = model_type;
     r.w1 = im1.width_;  r.h1 = im1.height_;
     r.w2 = im2.width_;  r.h2 = im2.height_;
     r.ok = true;
 
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
+    ho.model_type_ = model_type;
 
-    // ── VRAM estimates (no GPU calls) ───────────────────
+    // -- VRAM estimates (no GPU calls) -------------------
     r.vram_extract    = EstimateVramExtractSift(im1.width_, im1.height_, &eo);
     r.vram_match      = EstimateVramMatchSift(eo.max_keypoints_, eo.max_keypoints_);
     r.vram_homography = EstimateVramFindHomography(eo.max_keypoints_, &ho);
     r.vram_warp       = EstimateVramWarpImages(im1.width_, im1.height_, im2.width_, im2.height_);
     r.vram_full       = EstimateVramFullPipeline(im1.width_, im1.height_, im2.width_, im2.height_, &eo, &ho);
 
-    // ── ExtractSiftFromImage ────────────────────────────
+    // -- ExtractSiftFromImage ----------------------------
     {
         SiftData sd1{}, sd2{};
         auto t0 = Clock::now();
@@ -218,7 +222,7 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
         DeleteSiftData(&sd2);
     }
 
-    // ── MatchSiftData ───────────────────────────────────
+    // -- MatchSiftData -----------------------------------
     {
         SiftData sd1{}, sd2{};
         ExtractSiftFromImage(&im1, &sd1, &eo);
@@ -238,7 +242,7 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
         DeleteSiftData(&sd2);
     }
 
-    // ── FindHomography ──────────────────────────────────
+    // -- FindHomography ----------------------------------
     {
         SiftData sd1{}, sd2{};
         ExtractSiftFromImage(&im1, &sd1, &eo);
@@ -257,7 +261,7 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
         DeleteSiftData(&sd2);
     }
 
-    // ── WarpImages (GPU path) ───────────────────────────
+    // -- WarpImages (GPU path) ---------------------------
     {
         SiftData sd1{}, sd2{};
         ExtractSiftFromImage(&im1, &sd1, &eo);
@@ -289,7 +293,7 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
         DeleteSiftData(&sd2);
     }
 
-    // ── Full pipeline (convenience function) ────────────
+    // -- Full pipeline (convenience function) ------------
     {
         SiftData sd1{}, sd2{};
         float H[9]{};
@@ -310,7 +314,7 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
     return r;
 }
 
-// ── Pretty-print results table ──────────────────────────
+// -- Pretty-print results table --------------------------
 
 static void print_separator(int total_width)
 {
@@ -493,7 +497,96 @@ static void print_results(const std::vector<BenchResult>& results)
     print_separator(bTotal);
 }
 
-// ── Main ────────────────────────────────────────────────
+static void print_model_comparison(const std::vector<BenchResult>& results)
+{
+    // Group results by label: find pairs (HOMOGRAPHY, SIMILARITY)
+    struct Pair { const BenchResult* homo; const BenchResult* sim; };
+    std::vector<Pair> pairs;
+    for (size_t i = 0; i < results.size(); i++)
+    {
+        if (results[i].model_type != CUSIFT_MODEL_HOMOGRAPHY) continue;
+        Pair p{ &results[i], nullptr };
+        for (size_t j = 0; j < results.size(); j++)
+        {
+            if (results[j].model_type == CUSIFT_MODEL_SIMILARITY
+                && results[j].label == results[i].label)
+            {
+                p.sim = &results[j];
+                break;
+            }
+        }
+        if (p.sim) pairs.push_back(p);
+    }
+    if (pairs.empty()) return;
+
+    const int cL = 14, cH = 16, cS = 16, cD = 14, cR = 12;
+    const int cIH = 12, cIS = 12;
+    int tw = cL + cH + cS + cD + cR + cIH + cIS + 18;
+
+    std::cout << "\nModel Type Comparison: Homography Stage\n";
+    print_separator(tw);
+    std::cout << std::left
+              << std::setw(cL)  << "Scale"
+              << " | " << std::setw(cH)  << "Homography (ms)"
+              << " | " << std::setw(cS)  << "Similarity (ms)"
+              << " | " << std::setw(cD)  << "Delta (ms)"
+              << " | " << std::setw(cR)  << "Speedup"
+              << " | " << std::setw(cIH) << "Inliers (H)"
+              << " | " << std::setw(cIS) << "Inliers (S)"
+              << std::endl;
+    print_separator(tw);
+
+    for (const auto& p : pairs)
+    {
+        double delta = p.homo->homography_ms - p.sim->homography_ms;
+        double speedup = (p.sim->homography_ms > 0) ? p.homo->homography_ms / p.sim->homography_ms : 0.0;
+
+        std::cout << std::left
+                  << std::setw(cL) << p.homo->label
+                  << " | " << std::setw(cH) << fmt_ms(p.homo->homography_ms)
+                  << " | " << std::setw(cS) << fmt_ms(p.sim->homography_ms)
+                  << " | " << std::setw(cD) << fmt_ms(delta)
+                  << " | " << std::setw(cR) << fmt_ratio(speedup)
+                  << " | " << std::setw(cIH) << p.homo->inliers
+                  << " | " << std::setw(cIS) << p.sim->inliers
+                  << std::endl;
+    }
+
+    print_separator(tw);
+
+    // Full pipeline comparison
+    const int cFH = 18, cFS = 18, cFD = 14, cFR = 12;
+    int fw = cL + cFH + cFS + cFD + cFR + 12;
+
+    std::cout << "\nModel Type Comparison: Full Pipeline\n";
+    print_separator(fw);
+    std::cout << std::left
+              << std::setw(cL)  << "Scale"
+              << " | " << std::setw(cFH) << "Pipeline H (ms)"
+              << " | " << std::setw(cFS) << "Pipeline S (ms)"
+              << " | " << std::setw(cFD) << "Delta (ms)"
+              << " | " << std::setw(cFR) << "Speedup"
+              << std::endl;
+    print_separator(fw);
+
+    for (const auto& p : pairs)
+    {
+        double delta = p.homo->full_pipeline_ms - p.sim->full_pipeline_ms;
+        double speedup = (p.sim->full_pipeline_ms > 0) ? p.homo->full_pipeline_ms / p.sim->full_pipeline_ms : 0.0;
+
+        std::cout << std::left
+                  << std::setw(cL) << p.homo->label
+                  << " | " << std::setw(cFH) << fmt_ms(p.homo->full_pipeline_ms)
+                  << " | " << std::setw(cFS) << fmt_ms(p.sim->full_pipeline_ms)
+                  << " | " << std::setw(cFD) << fmt_ms(delta)
+                  << " | " << std::setw(cFR) << fmt_ratio(speedup)
+                  << std::endl;
+    }
+
+    print_separator(fw);
+}
+
+// -- Main ------------------------------------------------
 
 int main(int argc, char* argv[])
 {
@@ -547,13 +640,30 @@ int main(int argc, char* argv[])
 
     std::cout << "Running benchmarks..." << std::endl;
 
-    std::vector<BenchResult> results;
-    results.push_back(benchmark("1x (original)", im1,   im2));
-    results.push_back(benchmark("2x upscale",    im1_2, im2_2));
-    results.push_back(benchmark("4x upscale",    im1_4, im2_4));
-    results.push_back(benchmark("8x upscale",    im1_8, im2_8));
+    struct ScaleEntry { const char* label; const Image_t* a; const Image_t* b; };
+    ScaleEntry scales[] = {
+        { "1x (original)", &im1,   &im2 },
+        { "2x upscale",   &im1_2, &im2_2 },
+        { "4x upscale",   &im1_4, &im2_4 },
+        { "8x upscale",   &im1_8, &im2_8 },
+    };
 
-    print_results(results);
+    std::vector<BenchResult> results;
+    for (const auto& s : scales)
+    {
+        results.push_back(benchmark(s.label, *s.a, *s.b, CUSIFT_MODEL_HOMOGRAPHY));
+        results.push_back(benchmark(s.label, *s.a, *s.b, CUSIFT_MODEL_SIMILARITY));
+    }
+
+    // Print the standard tables using only the homography results
+    std::vector<BenchResult> homo_results;
+    for (const auto& r : results)
+        if (r.model_type == CUSIFT_MODEL_HOMOGRAPHY)
+            homo_results.push_back(r);
+    print_results(homo_results);
+
+    // Print model comparison tables
+    print_model_comparison(results);
 
     return 0;
 }
