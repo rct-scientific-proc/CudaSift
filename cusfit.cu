@@ -1019,7 +1019,7 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         WarpDualKernel<<<blocks, threads>>>(
             d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
             d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
-            outW, outH, out1Stride / sizeof(float), originU, originV,
+            outW, outH, static_cast<int>(out1Stride / sizeof(float)), originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
@@ -1203,7 +1203,7 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
         WarpDualKernel<<<blocks, threads>>>(
             d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
             d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
-            outW, outH, out1Stride / sizeof(float), originU, originV,
+            outW, outH, static_cast<int>(out1Stride / sizeof(float)), originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);

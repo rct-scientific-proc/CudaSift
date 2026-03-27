@@ -26,34 +26,56 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
 endif()
 
-# ── cusift library ───────────────────────────────────────
-set(LIB_CUDA_SOURCES
+# ── Source files ──────────────────────────────────────────
+set(CUDA_SOURCES
   cudaImage.cu
   cudaSiftH.cu
   matching.cu
-)
-
-set(LIB_C_SOURCES
-  geomFuncs.c
   cusfit.cu
 )
 
+set(C_SOURCES
+  geomFuncs.c
+)
+
+# ── CUDA object library (compiled by nvcc) ───────────────
+add_library(cusift_cuda OBJECT ${CUDA_SOURCES})
+target_include_directories(cusift_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(cusift_cuda PRIVATE VERBOSE)
+
+if(MSVC)
+  target_compile_options(cusift_cuda PRIVATE
+    -O2 --Werror cross-execution-space-call
+    -Xcompiler=/W4 -Xcompiler=/Zc:preprocessor
+  )
+else()
+  target_compile_options(cusift_cuda PRIVATE
+    -O2 --Werror cross-execution-space-call
+    -Xcompiler=-Wall,-Wextra
+  )
+endif()
+
+if(CUSIFT_USE_FAST_MATH)
+  target_compile_options(cusift_cuda PRIVATE --use_fast_math)
+endif()
+
+# ── cusift library (C/C++ sources + CUDA objects) ────────
 if(CUSIFT_BUILD_SHARED)
-  add_library(cusift SHARED ${LIB_CUDA_SOURCES} ${LIB_C_SOURCES})
+  set_target_properties(cusift_cuda PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(cusift_cuda PRIVATE CUSIFT_EXPORTS)
+  add_library(cusift SHARED ${C_SOURCES} $<TARGET_OBJECTS:cusift_cuda>)
   target_compile_definitions(cusift PRIVATE CUSIFT_EXPORTS)
-  # Default-hidden visibility on GCC/Clang; only CUSIFT_API symbols are exported
   set_target_properties(cusift PROPERTIES
     C_VISIBILITY_PRESET hidden
     CXX_VISIBILITY_PRESET hidden
-    CUDA_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
   )
 else()
-  add_library(cusift STATIC ${LIB_CUDA_SOURCES} ${LIB_C_SOURCES})
+  add_library(cusift STATIC ${C_SOURCES} $<TARGET_OBJECTS:cusift_cuda>)
   target_compile_definitions(cusift PUBLIC CUSIFT_STATIC)
 endif()
 
-# Public headers so consumers get the include path automatically
 target_include_directories(cusift
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -62,41 +84,24 @@ target_include_directories(cusift
 
 target_compile_definitions(cusift PRIVATE VERBOSE)
 
-# Platform-specific flags
+# C/C++ compile options (no COMPILE_LANGUAGE guards needed — only C sources in this target)
 if(MSVC)
-  target_compile_options(cusift PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:/W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS>
-    $<$<COMPILE_LANGUAGE:CXX>:/W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS>
-    $<$<COMPILE_LANGUAGE:CUDA>:-O2 --Werror cross-execution-space-call -Xcompiler=/W4 -Xcompiler=/Zc:preprocessor>
-  )
-  # AVX2 + FMA for geomFuncs.c
+  target_compile_options(cusift PRIVATE /W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
   set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
-  target_compile_options(cusift PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Wpedantic -O2>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -O2>
-    $<$<COMPILE_LANGUAGE:CUDA>:-O2 --Werror cross-execution-space-call -Xcompiler=-Wall,-Wextra>
-  )
-  # AVX2 + FMA for geomFuncs.c
+  target_compile_options(cusift PRIVATE -Wall -Wextra -Wpedantic -O2)
   set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 endif()
 
-if(CUSIFT_USE_FAST_MATH)
-  target_compile_options(cusift PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
-  )
-endif()
-
-# cudart is linked automatically by CMake when CUDA is a project language
+# Link CUDA runtime (needed since cusift itself has no .cu files)
+find_package(CUDAToolkit REQUIRED)
+target_link_libraries(cusift PRIVATE CUDA::cudart_static)
 
 # Link OpenMP if available
 if(OpenMP_CXX_FOUND)
   target_link_libraries(cusift PRIVATE OpenMP::OpenMP_CXX)
-  # nvcc doesn't understand OpenMP flags directly; forward them to the host compiler
   if(NOT MSVC AND OpenMP_CXX_FLAGS)
-    target_compile_options(cusift PRIVATE
-      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${OpenMP_CXX_FLAGS}>
-    )
+    target_compile_options(cusift_cuda PRIVATE -Xcompiler=${OpenMP_CXX_FLAGS})
   endif()
 endif()
 
