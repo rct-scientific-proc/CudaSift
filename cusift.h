@@ -471,6 +471,25 @@ extern "C"
      */
     CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2);
 
+    /**
+     * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done.
+     * This function is useful for applications that require both feature matching and image alignment, such as panorama stitching or object recognition. It provides a streamlined interface for performing the entire workflow with a single function call.
+     *
+     * @param image1 Pointer to the first input image.
+     * @param image2 Pointer to the second input image.
+     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
+     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
+     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
+     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
+     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
+     * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
+     * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
+     * @param num_homography_attempts Integer specifying the number of homography estimation attempts to perform. The library will run the homography estimation process multiple times with different random seeds and return the best result based on the number of inliers or the average inlier error. This can improve robustness against outliers and increase the chances of finding a good homography, especially in challenging scenarios with few matches or high noise. Set this to 1 for a single attempt (default), or higher for more attempts at the cost of increased computation time.
+     * @param homography_goal Integer specifying the goal for homography estimation. Use CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS to maximize the number of inliers, or CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF to minimize the difference between the 2x2 submatrix of the homography and the identity matrix, giving more wiegth to homographies that minimize rotation shear and scale.
+     */
+    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal);
+
     // ── VRAM estimation functions ────────────────────────────────────────
 
     /**

@@ -661,7 +661,8 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
 
     // Sub-test 1: MAX_INLIERS goal with multiple attempts
     {
-        std::cout << "  Goal: MAX_INLIERS, 5 attempts" << std::endl;
+        constexpr int num_attempts = 20;
+        std::cout << "  Goal: MAX_INLIERS, " << num_attempts << " attempts" << std::endl;
         SiftData sd1, sd2;
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
@@ -671,7 +672,7 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
         int nm = 0;
 
         ExtractAndMatchAndFindHomography_Multi(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                              5, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+                                              num_attempts, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
         if (check_error("Multi (MAX_INLIERS)"))
         {
             pass = false;
@@ -692,7 +693,8 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
 
     // Sub-test 2: MIN_EYE_DIFF goal with multiple attempts
     {
-        std::cout << "  Goal: MIN_EYE_DIFF, 5 attempts" << std::endl;
+        constexpr int num_attempts = 20;
+        std::cout << "  Goal: MIN_EYE_DIFF, " << num_attempts << " attempts" << std::endl;
         SiftData sd1, sd2;
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
@@ -702,7 +704,7 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
         int nm = 0;
 
         ExtractAndMatchAndFindHomography_Multi(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                              5, CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF);
+                                              num_attempts, CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF);
         if (check_error("Multi (MIN_EYE_DIFF)"))
         {
             pass = false;
@@ -747,6 +749,127 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
                 pass = false;
             }
         }
+        DeleteSiftData(&sd1);
+        DeleteSiftData(&sd2);
+    }
+
+    std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
+    return pass;
+}
+
+// -- Test: ExtractAndMatchAndFindHomography_Multi_AndWarp -
+
+static bool test_extract_match_homography_multi_warp(const Image_t& im1, const Image_t& im2)
+{
+    std::cout << "[TEST] ExtractAndMatchAndFindHomography_Multi_AndWarp" << std::endl;
+
+    bool pass = true;
+
+    {
+        constexpr int num_attempts = 20;
+        std::cout << "  Goal: MAX_INLIERS, " << num_attempts << " attempts" << std::endl;
+        SiftData sd1, sd2;
+        ExtractSiftOptions_t eo = default_extract_options();
+        FindHomographyOptions_t ho = default_homography_options();
+        ho.seed_ = 0;
+
+        float H[9];
+        int nm = 0;
+        Image_t w1 = {}, w2 = {};
+
+        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
+                                                       &w1, &w2, 5, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        if (check_error("Multi_AndWarp (MAX_INLIERS)"))
+        {
+            pass = false;
+        }
+        else
+        {
+            std::cout << "    Inliers: " << nm << std::endl;
+            std::cout << "    Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+            print_homography(H);
+            if (nm <= 0 || !homography_is_valid(H)
+                || w1.host_img_ == nullptr || w2.host_img_ == nullptr
+                || w1.width_ <= 0 || w1.height_ <= 0)
+            {
+                std::cerr << "    [FAIL] invalid result" << std::endl;
+                pass = false;
+            }
+        }
+        FreeImage(&w1);
+        FreeImage(&w2);
+        DeleteSiftData(&sd1);
+        DeleteSiftData(&sd2);
+    }
+
+    {
+        constexpr int num_attempts = 20;
+        std::cout << "  Goal: MIN_EYE_DIFF, " << num_attempts << " attempts" << std::endl;
+        SiftData sd1, sd2;
+        ExtractSiftOptions_t eo = default_extract_options();
+        FindHomographyOptions_t ho = default_homography_options();
+        ho.seed_ = 0;
+
+        float H[9];
+        int nm = 0;
+        Image_t w1 = {}, w2 = {};
+
+        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
+                                                       &w1, &w2, num_attempts, CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF);
+        if (check_error("Multi_AndWarp (MIN_EYE_DIFF)"))
+        {
+            pass = false;
+        }
+        else
+        {
+            std::cout << "    Inliers: " << nm << std::endl;
+            std::cout << "    Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+            print_homography(H);
+            if (nm <= 0 || !homography_is_valid(H)
+                || w1.host_img_ == nullptr || w2.host_img_ == nullptr
+                || w1.width_ <= 0 || w1.height_ <= 0)
+            {
+                std::cerr << "    [FAIL] invalid result" << std::endl;
+                pass = false;
+            }
+        }
+        FreeImage(&w1);
+        FreeImage(&w2);
+        DeleteSiftData(&sd1);
+        DeleteSiftData(&sd2);
+    }
+
+    {
+        std::cout << "  Single attempt (num_homography_attempts=1)" << std::endl;
+        SiftData sd1, sd2;
+        ExtractSiftOptions_t eo = default_extract_options();
+        FindHomographyOptions_t ho = default_homography_options();
+
+        float H[9];
+        int nm = 0;
+        Image_t w1 = {}, w2 = {};
+
+        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
+                                                       &w1, &w2, 1, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        if (check_error("Multi_AndWarp (single attempt)"))
+        {
+            pass = false;
+        }
+        else
+        {
+            std::cout << "    Inliers: " << nm << std::endl;
+            std::cout << "    Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+            print_homography(H);
+            if (nm <= 0 || !homography_is_valid(H)
+                || w1.host_img_ == nullptr || w2.host_img_ == nullptr
+                || w1.width_ <= 0 || w1.height_ <= 0)
+            {
+                std::cerr << "    [FAIL] invalid result" << std::endl;
+                pass = false;
+            }
+        }
+        FreeImage(&w1);
+        FreeImage(&w2);
         DeleteSiftData(&sd1);
         DeleteSiftData(&sd2);
     }
@@ -867,6 +990,7 @@ int main(int argc, char* argv[])
     run(test_extract_match_homography_both_models(im1, im2));
     run(test_extract_match_homography_warp_both_models(im1, im2));
     run(test_extract_match_homography_multi(im1, im2));
+    run(test_extract_match_homography_multi_warp(im1, im2));
     run(test_estimate_vram(im1, im2));
 
     std::cout << "========================================" << std::endl;

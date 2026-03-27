@@ -175,6 +175,9 @@ struct BenchResult
     int warp_w, warp_h;
 
     double full_pipeline_ms;
+    double full_pipeline_multi_warp_ms;
+    int multi_warp_inliers;
+    int multi_warp_w, multi_warp_h;
 
     size_t vram_extract;
     size_t vram_match;
@@ -311,6 +314,28 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
         DeleteSiftData(&sd2);
     }
 
+    // -- Full pipeline (multi-attempt convenience function) -
+    {
+        SiftData sd1{}, sd2{};
+        float H[9]{};
+        int nm = 0;
+        Image_t w1{}, w2{};
+
+        auto t0 = Clock::now();
+        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
+                                                      &w1, &w2, 5, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        auto t1 = Clock::now();
+        r.full_pipeline_multi_warp_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        r.multi_warp_inliers = nm;
+        r.multi_warp_w = w1.width_;
+        r.multi_warp_h = w1.height_;
+        if (check_error("FullPipelineMultiWarp")) r.ok = false;
+        FreeImage(&w1);
+        FreeImage(&w2);
+        DeleteSiftData(&sd1);
+        DeleteSiftData(&sd2);
+    }
+
     // -- Multi-attempt homography (5 attempts, both goals) --
     {
         for (int goal = 0; goal <= 1; goal++)
@@ -357,7 +382,7 @@ static void print_results(const std::vector<BenchResult>& results)
     const int cTime  = 14;
     const int cVram  = 14;
 
-    int total = cLabel + cRes + cKP + 4 * cTime + cVram + 9; // 9 separators
+    int total = cLabel + cRes + cKP + 5 * cTime + cVram + 10;
 
     std::cout << "\n";
     print_separator(total);
@@ -369,6 +394,7 @@ static void print_results(const std::vector<BenchResult>& results)
               << " | " << std::setw(cTime)  << "Match"
               << " | " << std::setw(cTime)  << "Homography"
               << " | " << std::setw(cTime)  << "Warp (GPU)"
+              << " | " << std::setw(cTime)  << "Multi+Warp"
               << " | " << std::setw(cVram)  << "Est. VRAM"
               << std::endl;
     print_separator(total);
@@ -386,6 +412,7 @@ static void print_results(const std::vector<BenchResult>& results)
                   << " | " << std::setw(cTime)  << fmt_ms(r.match_ms)
                   << " | " << std::setw(cTime)  << fmt_ms(r.homography_ms)
                   << " | " << std::setw(cTime)  << (r.warp_gpu_ms > 0 ? fmt_ms(r.warp_gpu_ms) : "N/A")
+                  << " | " << std::setw(cTime)  << (r.full_pipeline_multi_warp_ms > 0 ? fmt_ms(r.full_pipeline_multi_warp_ms) : "N/A")
                   << " | " << std::setw(cVram)  << fmt_bytes(r.vram_full)
                   << std::endl;
     }

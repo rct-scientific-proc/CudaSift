@@ -1372,6 +1372,235 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
     }); // end cusift_api_guard for ExtractAndMatchAndFindHomographyAndWarp_GPU
 }
 
+void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal)
+{
+    cusift_api_guard([&]()
+    {
+        int w1 = image1->width_, h1 = image1->height_;
+        int w2 = image2->width_, h2 = image2->height_;
+        int maxW = std::max(w1, w2);
+        int maxH = std::max(h1, h2);
+
+        CudaImageGuard cuda_image1;
+        CudaImageGuard cuda_image2;
+
+        int minDim = std::min({w1, h1, w2, h2});
+        int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
+        int octaves = std::min(extract_options->num_octaves_, maxOctaves);
+        if (extract_options->num_octaves_ > maxOctaves)
+        {
+            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
+        }
+
+        octaves = std::min(octaves, 7);
+        octaves = std::max(octaves, 3);
+
+        SiftTempMemoryGuard tempMemory(AllocSiftTempMemory(maxW, maxH, octaves));
+
+        InitSiftData(sift_data1, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image1.get(), w1, h1,
+                           p_iAlignUp(w1, 128), false, nullptr, image1->host_img_);
+        CudaImage_Download(cuda_image1.get());
+        ExtractSift(sift_data1, cuda_image1.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->highest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data1, extract_options->scale_suppression_radius_);
+
+        InitSiftData(sift_data2, extract_options->max_keypoints_, true, true);
+        CudaImage_Allocate(cuda_image2.get(), w2, h2,
+                           p_iAlignUp(w2, 128), false, nullptr, image2->host_img_);
+        CudaImage_Download(cuda_image2.get());
+        ExtractSift(sift_data2, cuda_image2.get(), octaves,
+                    extract_options->init_blur_, extract_options->thresh_,
+                    extract_options->lowest_scale_, extract_options->highest_scale_, extract_options->edge_thresh_,
+                    tempMemory.get());
+        if (extract_options->scale_suppression_radius_ > 0.0f)
+            SuppressEmbeddedPoints(sift_data2, extract_options->scale_suppression_radius_);
+
+        MatchSiftData_private(sift_data1, sift_data2);
+
+        int attempts = std::max(num_homography_attempts, 1);
+        FindHomographyOptions_t opts = *homography_options;
+        std::random_device rd;
+
+        float bestH[9] = {};
+        int bestInliers = -1;
+        float bestScore = FLT_MAX;
+
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            float candidateH[9];
+            int candidateInliers = 0;
+
+            if (homography_options->seed_ == 0)
+                opts.seed_ = rd();
+            else
+                opts.seed_ = homography_options->seed_ + (unsigned int)attempt;
+
+            FindGeometricModel(
+                sift_data1, candidateH, &candidateInliers,
+                &opts);
+
+            bool finite = true;
+            for (int i = 0; i < 9; i++)
+            {
+                if (!std::isfinite(candidateH[i]))
+                {
+                    finite = false;
+                    break;
+                }
+            }
+            if (!finite)
+                continue;
+
+            ImproveHomography(
+                sift_data1, candidateH,
+                opts.improve_num_loops_,
+                opts.improve_min_score_,
+                opts.improve_max_ambiguity_,
+                opts.improve_thresh_);
+
+            bool isBetter = false;
+            if (homography_goal == CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF)
+            {
+                float score = EyeDiff2x2(candidateH);
+                if (bestInliers < 0 || score < bestScore)
+                {
+                    bestScore = score;
+                    isBetter = true;
+                }
+            }
+            else
+            {
+                if (candidateInliers > bestInliers)
+                    isBetter = true;
+            }
+
+            if (isBetter)
+            {
+                std::memcpy(bestH, candidateH, sizeof(bestH));
+                bestInliers = candidateInliers;
+            }
+        }
+
+        if (bestInliers < 0)
+        {
+            ERROR("Homography contains non-finite values in all attempts");
+        }
+
+        std::memcpy(homography, bestH, 9 * sizeof(float));
+        *num_matches = bestInliers;
+
+        float Hinv[9];
+        if (!Invert3x3(homography, Hinv))
+        {
+            ERROR("Homography is too close to singular to invert");
+        }
+
+        float corners2[4][3] = {
+            {0.0f, 0.0f, 1.0f},
+            {(float)(w2 - 1), 0.0f, 1.0f},
+            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
+            {0.0f, (float)(h2 - 1), 1.0f}};
+
+        float cx[4], cy[4];
+        for (int i = 0; i < 4; i++)
+        {
+            float x = corners2[i][0], y = corners2[i][1];
+            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
+            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
+            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
+        }
+
+        float uMin = 0.0f, uMax = (float)(w1 - 1);
+        float vMin = 0.0f, vMax = (float)(h1 - 1);
+        for (int i = 0; i < 4; i++)
+        {
+            uMin = std::min(uMin, cx[i]);
+            uMax = std::max(uMax, cx[i]);
+            vMin = std::min(vMin, cy[i]);
+            vMax = std::max(vMax, cy[i]);
+        }
+
+        int u0 = (int)floorf(uMin);
+        int u1 = (int)ceilf(uMax);
+        int v0 = (int)floorf(vMin);
+        int v1 = (int)ceilf(vMax);
+
+        int outW = u1 - u0 + 1;
+        int outH = v1 - v0 + 1;
+        float originU = (float)u0;
+        float originV = (float)v0;
+
+        int maxW_ = 2 * std::max(image1->width_, image2->width_);
+        int maxH_ = 2 * std::max(image1->height_, image2->height_);
+        if (outW > maxW_ || outH > maxH_)
+        {
+            std::stringstream ss;
+            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
+            ERROR(ss.str().c_str());
+        }
+        if (outW <= 0 || outH <= 0)
+        {
+            std::stringstream ss;
+            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
+            ERROR(ss.str().c_str());
+        }
+
+        float *d_src1 = cuda_image1.get()->d_data;
+        float *d_src2 = cuda_image2.get()->d_data;
+        int src1Pitch = cuda_image1.get()->pitch;
+        int src2Pitch = cuda_image2.get()->pitch;
+
+        DevicePtrGuard<float> d_out1Guard, d_out2Guard;
+
+        size_t out1Stride = 0;
+        size_t out2Stride = 0;
+
+        safeCall(cudaMallocPitch(&d_out1Guard.getRef(), &out1Stride, outW * sizeof(float), outH));
+        safeCall(cudaMallocPitch(&d_out2Guard.getRef(), &out2Stride, outW * sizeof(float), outH));
+
+        float H00 = homography[0], H01 = homography[1], H02 = homography[2];
+        float H10 = homography[3], H11 = homography[4], H12 = homography[5];
+        float H20 = homography[6], H21 = homography[7], H22 = homography[8];
+
+        dim3 threads(16, 16);
+        dim3 blocks((outW + threads.x - 1) / threads.x,
+                    (outH + threads.y - 1) / threads.y);
+
+        WarpDualKernel<<<blocks, threads>>>(
+            d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
+            d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
+            outW, outH, static_cast<int>(out1Stride / sizeof(float)), originU, originV,
+            H00, H01, H02,
+            H10, H11, H12,
+            H20, H21, H22);
+
+        safeCall(cudaDeviceSynchronize());
+
+        size_t nPixels = (size_t)outW * outH;
+        HostPtrGuard<float> out1Guard((float *)malloc(sizeof(float) * nPixels));
+        HostPtrGuard<float> out2Guard((float *)malloc(sizeof(float) * nPixels));
+        if (!out1Guard.get() || !out2Guard.get())
+        {
+            ERROR("Warping: return image host allocation failed");
+        }
+
+        safeCall(cudaMemcpy2D(out1Guard.get(), outW * sizeof(float), d_out1Guard.get(), out1Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
+        safeCall(cudaMemcpy2D(out2Guard.get(), outW * sizeof(float), d_out2Guard.get(), out2Stride, outW * sizeof(float), outH, cudaMemcpyDeviceToHost));
+
+        warped_image1->host_img_ = out1Guard.release();
+        warped_image1->width_ = outW;
+        warped_image1->height_ = outH;
+
+        warped_image2->host_img_ = out2Guard.release();
+        warped_image2->width_ = outW;
+        warped_image2->height_ = outH;
+    });
+}
+
 // ── VRAM estimation helpers ─────────────────────────────────────────────────
 
 static size_t estimatePyramidBytes(int width, int height, int numOctaves)
