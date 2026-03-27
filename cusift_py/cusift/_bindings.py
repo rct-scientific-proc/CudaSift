@@ -224,6 +224,20 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
         POINTER(FindHomographyOptions_t),
     ]
 
+    lib.ExtractAndMatchAndFindHomography_Multi.restype = None
+    lib.ExtractAndMatchAndFindHomography_Multi.argtypes = [
+        POINTER(Image_t),
+        POINTER(Image_t),
+        POINTER(SiftData),
+        POINTER(SiftData),
+        POINTER(c_float),
+        POINTER(c_int),
+        POINTER(ExtractSiftOptions_t),
+        POINTER(FindHomographyOptions_t),
+        c_int,
+        c_int,
+    ]
+
     lib.ExtractAndMatchAndFindHomographyAndWarp.restype = None
     lib.ExtractAndMatchAndFindHomographyAndWarp.argtypes = [
         POINTER(Image_t),

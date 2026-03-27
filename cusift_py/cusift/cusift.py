@@ -36,6 +36,15 @@ class CuSiftError(Exception):
         super().__init__(message)
 
 
+# -- Homography goal constants ------------------------------------------------
+
+HOMOGRAPHY_GOAL_MAX_INLIERS = 0
+"""Maximise the number of RANSAC inliers."""
+
+HOMOGRAPHY_GOAL_MIN_EYE_DIFF = 1
+"""Minimise the Frobenius distance between the top-left 2×2 block and the identity matrix."""
+
+
 def _check_error(lib: ctypes.CDLL) -> None:
     """Query the library error flag; raise :class:`CuSiftError` if set."""
     if lib.CusiftHadError():
@@ -837,6 +846,140 @@ class CuSift:
             byref(num_matches),
             byref(ext_ct),
             byref(hom_ct),
+        )
+        kp1 = None
+        kp2 = None
+        try:
+            _check_error(self._lib)
+
+            # -- Convert keypoints ----------------------------------------
+            kps1: List[Keypoint] = []
+            for i in range(sift_data1.numPts):
+                kps1.append(Keypoint._from_sift_point(sift_data1.h_data[i]))
+            kp1 = KeypointList(kps1, sift_data1, self._lib)
+
+            kps2: List[Keypoint] = []
+            for i in range(sift_data2.numPts):
+                kps2.append(Keypoint._from_sift_point(sift_data2.h_data[i]))
+            kp2 = KeypointList(kps2, sift_data2, self._lib)
+
+            # -- Read back match results from sift_data1 ------------------
+            matches: List[MatchResult] = []
+            for i in range(sift_data1.numPts):
+                pt = sift_data1.h_data[i]
+                if pt.match >= 0:
+                    matches.append(
+                        MatchResult(
+                            query_index=i,
+                            match_index=pt.match,
+                            x1=pt.xpos,
+                            y1=pt.ypos,
+                            x2=pt.match_xpos,
+                            y2=pt.match_ypos,
+                            error=pt.match_error,
+                            score=pt.score,
+                            ambiguity=pt.ambiguity,
+                        )
+                    )
+
+            # -- Convert homography to numpy ------------------------------
+            H = np.ctypeslib.as_array(homography, shape=(9,)).copy().reshape(3, 3)
+
+            return kp1, kp2, matches, H, num_matches.value
+        except:
+            if kp1 is None:
+                self._lib.DeleteSiftData(byref(sift_data1))
+            if kp2 is None:
+                self._lib.DeleteSiftData(byref(sift_data2))
+            raise
+
+    def extract_and_match_and_find_homography_multi(
+        self,
+        image1: Union[str, Path, np.ndarray],
+        image2: Union[str, Path, np.ndarray],
+        *,
+        width1: Optional[int] = None,
+        height1: Optional[int] = None,
+        width2: Optional[int] = None,
+        height2: Optional[int] = None,
+        extract_options: Optional[ExtractOptions] = None,
+        homography_options: Optional[HomographyOptions] = None,
+        num_homography_attempts: int = 5,
+        homography_goal: int = HOMOGRAPHY_GOAL_MAX_INLIERS,
+    ) -> tuple[KeypointList, KeypointList, List[MatchResult], np.ndarray, int]:
+        """Extract, match, and find the best homography over multiple attempts.
+
+        This wraps the C ``ExtractAndMatchAndFindHomography_Multi`` function.
+        It runs :meth:`extract`, :meth:`match`, and :meth:`find_homography`
+        in a single GPU-accelerated call, repeating the homography estimation
+        *num_homography_attempts* times with different random seeds and
+        returning the best result according to *homography_goal*.
+
+        Parameters
+        ----------
+        image1 : str | Path | numpy.ndarray
+            First image (file path or 2-D ``float32`` array).
+        image2 : str | Path | numpy.ndarray
+            Second image (file path or 2-D ``float32`` array).
+        width1, height1 : int, optional
+            Dimension overrides for *image1* (only needed for 1-D arrays).
+        width2, height2 : int, optional
+            Dimension overrides for *image2* (only needed for 1-D arrays).
+        extract_options : ExtractOptions, optional
+            Extraction parameters applied to *both* images.  Uses
+            :class:`ExtractOptions` defaults when not provided.
+        homography_options : HomographyOptions, optional
+            RANSAC / refinement parameters.  Uses
+            :class:`HomographyOptions` defaults when not provided.
+        num_homography_attempts : int
+            Number of homography estimation attempts (default 5).
+            Each attempt uses a different random seed.  The best
+            result is returned.
+        homography_goal : int
+            Selection criterion.  Use :data:`HOMOGRAPHY_GOAL_MAX_INLIERS`
+            (default) to pick the homography with the most inliers, or
+            :data:`HOMOGRAPHY_GOAL_MIN_EYE_DIFF` to prefer homographies
+            whose top-left 2×2 block is closest to the identity.
+
+        Returns
+        -------
+        (kp1, kp2, matches, homography, num_inliers)
+            *kp1* and *kp2* are :class:`KeypointList` objects.
+            *matches* contains one :class:`MatchResult` per successful
+            correspondence.  *homography* is a ``(3, 3)`` float32 array.
+            *num_inliers* is the inlier count of the best homography.
+
+        Raises
+        ------
+        CuSiftError
+            If the underlying C library reports an error.
+        """
+        # -- Resolve pixel data -------------------------------------------
+        pix1, w1, h1 = _resolve_image_arg(image1, width1, height1, "image1")
+        pix2, w2, h2 = _resolve_image_arg(image2, width2, height2, "image2")
+
+        # -- Build ctypes arguments ---------------------------------------
+        img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
+        img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
+        sift_data1 = SiftData()
+        sift_data2 = SiftData()
+        homography = (c_float * 9)()
+        num_matches = c_int(0)
+        ext_ct = (extract_options or ExtractOptions())._to_ctypes()
+        hom_ct = (homography_options or HomographyOptions())._to_ctypes()
+
+        # -- Call the C function ------------------------------------------
+        self._lib.ExtractAndMatchAndFindHomography_Multi(
+            byref(img1_ct),
+            byref(img2_ct),
+            byref(sift_data1),
+            byref(sift_data2),
+            homography,
+            byref(num_matches),
+            byref(ext_ct),
+            byref(hom_ct),
+            c_int(num_homography_attempts),
+            c_int(homography_goal),
         )
         kp1 = None
         kp2 = None
