@@ -15,6 +15,7 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # ── Options ──────────────────────────────────────────────
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
+option(CUSIFT_USE_FAST_MATH  "Compile CUDA code with --use_fast_math"             OFF)
 
 # ── OpenMP ───────────────────────────────────────────────
 find_package(OpenMP COMPONENTS C CXX)
@@ -64,9 +65,9 @@ target_compile_definitions(cusift PRIVATE VERBOSE)
 # Platform-specific flags
 if(MSVC)
   target_compile_options(cusift PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:/W4 /O2 /D_CRT_SECURE_NO_WARNINGS>
-    $<$<COMPILE_LANGUAGE:CXX>:/W4 /O2 /D_CRT_SECURE_NO_WARNINGS>
-    $<$<COMPILE_LANGUAGE:CUDA>:-O2 --Werror cross-execution-space-call -Xcompiler=/W4>
+    $<$<COMPILE_LANGUAGE:C>:/W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS>
+    $<$<COMPILE_LANGUAGE:CXX>:/W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS>
+    $<$<COMPILE_LANGUAGE:CUDA>:-O2 --Werror cross-execution-space-call -Xcompiler=/W4 -Xcompiler=/Zc:preprocessor>
   )
   # AVX2 + FMA for geomFuncs.c
   set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
@@ -78,6 +79,12 @@ else()
   )
   # AVX2 + FMA for geomFuncs.c
   set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+endif()
+
+if(CUSIFT_USE_FAST_MATH)
+  target_compile_options(cusift PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+  )
 endif()
 
 # cudart is linked automatically by CMake when CUDA is a project language
