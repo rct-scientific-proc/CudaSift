@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.23)
 
 project(cudaSift
   VERSION 2.0.0
@@ -16,13 +16,16 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # ── Options ──────────────────────────────────────────────
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
 option(CUSIFT_USE_FAST_MATH  "Compile CUDA code with --use_fast_math"             OFF)
+option(CUSIFT_ALL_CUDA_ARCHS "Build for all supported CUDA architectures"         OFF)
 
 # ── OpenMP ───────────────────────────────────────────────
 find_package(OpenMP COMPONENTS C CXX)
 
 # ── CUDA architecture ───────────────────────────────────
 # Override with -DCMAKE_CUDA_ARCHITECTURES="75;86" etc.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+if(CUSIFT_ALL_CUDA_ARCHS)
+  set(CMAKE_CUDA_ARCHITECTURES all)
+elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
 endif()
 
