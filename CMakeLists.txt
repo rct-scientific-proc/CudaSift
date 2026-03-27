@@ -127,7 +127,7 @@ install(TARGETS cusift
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(TARGETS cusift_demo
+install(TARGETS cusift_demo cusift_speed
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
