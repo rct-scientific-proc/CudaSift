@@ -5,6 +5,19 @@
 #include "cusift.h"
 #include <stdbool.h>
 
+// SiftData is an internal structure not exposed in the public C API.
+// MATLAB's loadlibrary cannot handle structs containing pointers to
+// other structs, so SiftData lives here (internal) while the public
+// API uses opaque integer handles (CusiftSiftHandle).
+typedef struct
+{
+    int numPts;         /**< Number of available SIFT points. */
+    int maxPts;         /**< Number of allocated SIFT points. */
+
+    SiftPoint *h_data;  /**< Host (CPU) data. */
+    SiftPoint *d_data;  /**< Device (GPU) data. */
+} SiftData;
+
 
 #ifdef __cplusplus
 extern "C" {

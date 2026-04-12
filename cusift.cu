@@ -17,6 +17,7 @@
 #include <string>
 #include <random>
 #include <omp.h>
+#include <vector>
 
 #define ERROR(msg) __throw_error(__FILE__, __LINE__, msg)
 
@@ -127,6 +128,51 @@ static void cusift_api_guard(F &&fn)
     }
 }
 
+// ── Opaque handle table for SiftData ────────────────────
+struct HandleSlot
+{
+    SiftData data;
+    bool     valid = false;
+};
+
+static std::vector<HandleSlot> g_handle_table;
+
+static CusiftSiftHandle allocate_handle()
+{
+    for (int i = 0; i < (int)g_handle_table.size(); i++)
+    {
+        if (!g_handle_table[i].valid)
+        {
+            g_handle_table[i].valid = true;
+            std::memset(&g_handle_table[i].data, 0, sizeof(SiftData));
+            return i;
+        }
+    }
+    g_handle_table.push_back(HandleSlot{});
+    g_handle_table.back().valid = true;
+    std::memset(&g_handle_table.back().data, 0, sizeof(SiftData));
+    return (CusiftSiftHandle)(g_handle_table.size() - 1);
+}
+
+static SiftData *lookup_handle(CusiftSiftHandle handle)
+{
+    if (handle < 0 || handle >= (CusiftSiftHandle)g_handle_table.size() || !g_handle_table[handle].valid)
+    {
+        ERROR("Invalid SiftData handle");
+        return nullptr; // unreachable if ERROR throws
+    }
+    return &g_handle_table[handle].data;
+}
+
+static void release_handle(CusiftSiftHandle handle)
+{
+    if (handle >= 0 && handle < (CusiftSiftHandle)g_handle_table.size() && g_handle_table[handle].valid)
+    {
+        FreeSiftData(&g_handle_table[handle].data);
+        g_handle_table[handle].valid = false;
+    }
+}
+
 void CusiftGetLastErrorString(int *line_number, char filename[256], char error_message[256])
 {
     if (line_number)
@@ -164,10 +210,13 @@ void InitializeCudaSift()
     });
 }
 
-void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options)
+void ExtractSiftFromImage(const Image_t *image, CusiftSiftHandle *out_handle, const ExtractSiftOptions_t *options)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle h = allocate_handle();
+        SiftData *sift_data = lookup_handle(h);
+
         CudaImageGuard cuda_image;
 
         InitSiftData(sift_data, options->max_keypoints_, true, true);
@@ -211,21 +260,27 @@ void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const Extra
             tempMemory.get());
         if (options->scale_suppression_radius_ > 0.0f)
             SuppressEmbeddedPoints(sift_data, options->scale_suppression_radius_);
+
+        *out_handle = h;
     });
 }
 
-void MatchSiftData(SiftData *data1, SiftData *data2)
+void MatchSiftData(CusiftSiftHandle handle1, CusiftSiftHandle handle2)
 {
     cusift_api_guard([&]()
     {
+        SiftData *data1 = lookup_handle(handle1);
+        SiftData *data2 = lookup_handle(handle2);
         MatchSiftData_private(data1, data2);
     });
 }
 
-void FindHomography(SiftData *data, float *homography, int *num_matches, const FindHomographyOptions_t *options)
+void FindHomography(CusiftSiftHandle handle, float *homography, int *num_matches, const FindHomographyOptions_t *options)
 {
     cusift_api_guard([&]()
     {
+        SiftData *data = lookup_handle(handle);
+
         FindGeometricModel(
             data,
             homography,
@@ -251,13 +306,11 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
     });
 }
 
-void DeleteSiftData(SiftData *sift_data)
+void DeleteSiftData(CusiftSiftHandle handle)
 {
-    // FreeSiftData uses cudaFree directly (not safeCall), so it is
-    // destructor-safe and won't throw.  We still wrap for consistency.
     cusift_api_guard([&]()
     {
-        FreeSiftData(sift_data);
+        release_handle(handle);
     });
 }
 
@@ -286,9 +339,16 @@ void FreeImage_GPU(ImageStrided_t *image)
         }
 }
 
-void SaveSiftData(const char *filename, const SiftData *sift_data)
+void SaveSiftData(const char *filename, CusiftSiftHandle handle)
 {
-    if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
+    if (handle < 0 || handle >= (CusiftSiftHandle)g_handle_table.size() || !g_handle_table[handle].valid)
+    {
+        std::cerr << "SaveSiftData: invalid handle" << std::endl;
+        return;
+    }
+    const SiftData *sift_data = &g_handle_table[handle].data;
+
+    if (!sift_data->h_data || sift_data->numPts <= 0)
     {
         std::cerr << "SaveSiftData: no data to save" << std::endl;
         return;
@@ -337,10 +397,15 @@ void SaveSiftData(const char *filename, const SiftData *sift_data)
     fclose(f);
 }
 
-void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options)
+void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, const ExtractSiftOptions_t *extract_options)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle h1 = allocate_handle();
+        CusiftSiftHandle h2 = allocate_handle();
+        SiftData *sift_data1 = lookup_handle(h1);
+        SiftData *sift_data2 = lookup_handle(h2);
+
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -391,13 +456,21 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
 
         // Match
         MatchSiftData_private(sift_data1, sift_data2);
+
+        *out_handle1 = h1;
+        *out_handle2 = h2;
     });
 }
 
-void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options)
+void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle h1 = allocate_handle();
+        CusiftSiftHandle h2 = allocate_handle();
+        SiftData *sift_data1 = lookup_handle(h1);
+        SiftData *sift_data2 = lookup_handle(h2);
+
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -468,6 +541,9 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
             homography_options->improve_min_score_,
             homography_options->improve_max_ambiguity_,
             homography_options->improve_thresh_);
+
+        *out_handle1 = h1;
+        *out_handle2 = h2;
     });
 }
 
@@ -482,10 +558,15 @@ static float EyeDiff2x2(const float *H)
     return d00 * d00 + d01 * d01 + d10 * d10 + d11 * d11;
 }
 
-void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, int num_homography_attempts, int homography_goal)
+void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, int num_homography_attempts, int homography_goal)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle h1 = allocate_handle();
+        CusiftSiftHandle h2 = allocate_handle();
+        SiftData *sift_data1 = lookup_handle(h1);
+        SiftData *sift_data2 = lookup_handle(h2);
+
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -616,6 +697,9 @@ void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t
 
         std::memcpy(homography, bestH, 9 * sizeof(float));
         *num_matches = bestInliers;
+
+        *out_handle1 = h1;
+        *out_handle2 = h2;
     });
 }
 
@@ -727,7 +811,7 @@ __global__ void WarpDualKernel(
 
 // ── Main entry point ────────────────────────────────────
 void WarpImages(const Image_t *image1, const Image_t *image2, const float *homography,
-                Image_t *warped_image1, Image_t *warped_image2, bool useGPU)
+                Image_t *warped_image1, Image_t *warped_image2, int useGPU)
 {
     cusift_api_guard([&]()
     {
@@ -1009,10 +1093,15 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
     }); // end cusift_api_guard for WarpImages_GPU
 }
 
-void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
+void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle sh1 = allocate_handle();
+        CusiftSiftHandle sh2 = allocate_handle();
+        SiftData *sift_data1 = lookup_handle(sh1);
+        SiftData *sift_data2 = lookup_handle(sh2);
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
         int maxW = std::max(w1, w2);
@@ -1194,13 +1283,21 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         warped_image2->host_img_ = out2Guard.release();
         warped_image2->width_ = outW;
         warped_image2->height_ = outH;
+
+        *out_handle1 = sh1;
+        *out_handle2 = sh2;
     }); // end cusift_api_guard for ExtractAndMatchAndFindHomographyAndWarp
 }
 
-void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2)
+void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle sh1 = allocate_handle();
+        CusiftSiftHandle sh2 = allocate_handle();
+        SiftData *sift_data1 = lookup_handle(sh1);
+        SiftData *sift_data2 = lookup_handle(sh2);
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
         int maxW = std::max(w1, w2);
@@ -1369,13 +1466,21 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
         warped_image2->width_ = outW;
         warped_image2->height_ = outH;
         warped_image2->stride_ = out2Stride;
+
+        *out_handle1 = sh1;
+        *out_handle2 = sh2;
     }); // end cusift_api_guard for ExtractAndMatchAndFindHomographyAndWarp_GPU
 }
 
-void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal)
+void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal)
 {
     cusift_api_guard([&]()
     {
+        CusiftSiftHandle sh1 = allocate_handle();
+        CusiftSiftHandle sh2 = allocate_handle();
+        SiftData *sift_data1 = lookup_handle(sh1);
+        SiftData *sift_data2 = lookup_handle(sh2);
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
         int maxW = std::max(w1, w2);
@@ -1598,6 +1703,9 @@ void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const
         warped_image2->host_img_ = out2Guard.release();
         warped_image2->width_ = outW;
         warped_image2->height_ = outH;
+
+        *out_handle1 = sh1;
+        *out_handle2 = sh2;
     });
 }
 
@@ -1656,7 +1764,7 @@ static int clampOctaves(int requested, int width, int height)
     return octaves;
 }
 
-size_t EstimateVramExtractSift(int image_width, int image_height, const ExtractSiftOptions_t *options)
+unsigned long long EstimateVramExtractSift(int image_width, int image_height, const ExtractSiftOptions_t *options)
 {
     int octaves = clampOctaves(options->num_octaves_, image_width, image_height);
 
@@ -1668,13 +1776,13 @@ size_t EstimateVramExtractSift(int image_width, int image_height, const ExtractS
     return siftBytes + imageBytes + pyramidBytes + contextBytes;
 }
 
-size_t EstimateVramMatchSift(int max_keypoints1, int max_keypoints2)
+unsigned long long EstimateVramMatchSift(int max_keypoints1, int max_keypoints2)
 {
     return estimateSiftDataDeviceBytes(max_keypoints1)
          + estimateSiftDataDeviceBytes(max_keypoints2);
 }
 
-size_t EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions_t *options)
+unsigned long long EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions_t *options)
 {
     // Existing SiftData that must be resident
     size_t siftBytes = estimateSiftDataDeviceBytes(max_keypoints);
@@ -1697,7 +1805,7 @@ size_t EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions
     return siftBytes + coordBytes + randPtsBytes + modelBytes;
 }
 
-size_t EstimateVramWarpImages(int image_width1, int image_height1, int image_width2, int image_height2)
+unsigned long long EstimateVramWarpImages(int image_width1, int image_height1, int image_width2, int image_height2)
 {
     // Source images on device (pitch-aligned)
     size_t src1 = estimateCudaImageBytes(image_width1, image_height1);
@@ -1712,7 +1820,7 @@ size_t EstimateVramWarpImages(int image_width1, int image_height1, int image_wid
     return src1 + src2 + out1 + out2;
 }
 
-size_t EstimateVramFullPipeline(int image_width1, int image_height1,
+unsigned long long EstimateVramFullPipeline(int image_width1, int image_height1,
                                 int image_width2, int image_height2,
                                 const ExtractSiftOptions_t *extract_options,
                                 const FindHomographyOptions_t *homography_options)
@@ -1740,4 +1848,39 @@ size_t EstimateVramFullPipeline(int image_width1, int image_height1,
                     + EstimateVramWarpImages(image_width1, image_height1, image_width2, image_height2);
 
     return std::max({extractPeak, homographyPeak, warpPeak});
+}
+
+// ── Accessor functions ──────────────────────────────────────────────────────
+
+int CusiftGetNumPoints(CusiftSiftHandle handle)
+{
+    if (handle < 0 || handle >= (CusiftSiftHandle)g_handle_table.size() || !g_handle_table[handle].valid)
+        return 0;
+    return g_handle_table[handle].data.numPts;
+}
+
+void CusiftGetSiftPoint(CusiftSiftHandle handle, int index, SiftPoint *out)
+{
+    cusift_api_guard([&]()
+    {
+        SiftData *data = lookup_handle(handle);
+        if (index < 0 || index >= data->numPts)
+        {
+            ERROR("CusiftGetSiftPoint: index out of range");
+        }
+        *out = data->h_data[index];
+    });
+}
+
+void CusiftDeleteAllSiftData(void)
+{
+    for (int i = 0; i < (int)g_handle_table.size(); i++)
+    {
+        if (g_handle_table[i].valid)
+        {
+            FreeSiftData(&g_handle_table[i].data);
+            g_handle_table[i].valid = false;
+        }
+    }
+    g_handle_table.clear();
 }

@@ -43,6 +43,8 @@
  * - CusiftGetLastErrorString()
  * - CusiftHadError()
  * - SaveSiftData()
+ * - CusiftGetNumPoints()
+ * - CusiftGetSiftPoint()
  * - ExtractAndMatchSift()
  * - ExtractAndMatchAndFindHomography()
  * - ExtractAndMatchAndFindHomographyAndWarp()
@@ -126,16 +128,15 @@ extern "C"
     } SiftPoint;
 
     /**
-     * @brief Container for a set of SIFT keypoints on host and device.
+     * @brief Opaque handle to a set of SIFT keypoints managed by the library.
+     *
+     * The handle is returned by extraction functions and passed to matching,
+     * homography, and accessor functions.  Use DeleteSiftData() to release
+     * the resources associated with a handle.  A value of CUSIFT_INVALID_HANDLE
+     * indicates an invalid or uninitialized handle.
      */
-    typedef struct
-    {
-        int numPts;         /**< Number of available SIFT points. */
-        int maxPts;         /**< Number of allocated SIFT points. */
-
-        SiftPoint *h_data;  /**< Host (CPU) data. */
-        SiftPoint *d_data;  /**< Device (GPU) data. */
-    } SiftData;
+    typedef int CusiftSiftHandle;
+#define CUSIFT_INVALID_HANDLE (-1)
 
     /**
      * @brief A grayscale image stored as a contiguous float buffer.
@@ -160,7 +161,7 @@ extern "C"
         float *strided_img_;    /**< Pointer to row-major float32 pixel data with padding (for GPU warping). */
         int width_;             /**< Image width in pixels. */
         int height_;            /**< Image height in pixels. */
-        size_t stride_;         /**< Stride in bytes between rows (for GPU warping). */
+        unsigned long long stride_;  /**< Stride in bytes between rows (for GPU warping). */
     } ImageStrided_t;
     
 
@@ -305,28 +306,28 @@ extern "C"
      * @brief Extract SIFT features from an image. The caller is responsible for freeing the SiftData using DeleteSiftData() when done.
      *
      * @param image Pointer to the input image.
-     * @param sift_data Pointer to the SiftData structure where the extracted features will be stored.
+     * @param out_handle Pointer to a CusiftSiftHandle that will receive the handle to the extracted features. The caller must free the handle using DeleteSiftData() when done.
      * @param options Pointer to the ExtractSiftOptions_t structure containing extraction parameters.
      */
-    CUSIFT_API void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options);
+    CUSIFT_API void ExtractSiftFromImage(const Image_t *image, CusiftSiftHandle *out_handle, const ExtractSiftOptions_t *options);
 
     /**
      * @brief Match SIFT features between two SiftData structures. The match results are stored in the 'match', 'match_xpos', 'match_ypos', and 'match_error' fields of the SiftPoint structures in data1. The caller is responsible for ensuring that data1 and data2 are properly initialized and contain valid SIFT features before calling this function.
      *
-     * @param data1 Pointer to the first SiftData structure.
-     * @param data2 Pointer to the second SiftData structure.
+     * @param handle1 Handle to the first set of SIFT features (match results are stored here).
+     * @param handle2 Handle to the second set of SIFT features.
      */
-    CUSIFT_API void MatchSiftData(SiftData *data1, SiftData *data2);
+    CUSIFT_API void MatchSiftData(CusiftSiftHandle handle1, CusiftSiftHandle handle2);
 
     /**
      * @brief Find a homography transformation between matched SIFT features in the given SiftData structure. The homography is returned as a 3x3 matrix in row-major order in the 'homography' output parameter. The number of matches used to compute the homography is returned in the 'num_matches' output parameter. The caller is responsible for ensuring that the SiftData structure contains valid matched SIFT features before calling this function.
      *
-     * @param data Pointer to the SiftData structure containing matched SIFT features.
+     * @param handle Handle to the SiftData containing matched SIFT features.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
      * @param options Pointer to the FindHomographyOptions_t structure containing homography computation parameters.
      */
-    CUSIFT_API void FindHomography(SiftData *data, float *homography, int *num_matches, const FindHomographyOptions_t *options);
+    CUSIFT_API void FindHomography(CusiftSiftHandle handle, float *homography, int *num_matches, const FindHomographyOptions_t *options);
 
     /**
      * @brief Given the computed homography, warp the input images to align them. The warped images are returned in the 'warped_image1' and 'warped_image2' output parameters. The caller is responsible for ensuring that the input images and homography are valid before calling this function, and for freeing any resources associated with the warped images when done.
@@ -337,9 +338,9 @@ extern "C"
      * @param homography Pointer to a 3x3 matrix in row-major order representing the homography transformation.
      * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored.
      * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored.
-     * @param useGPU Boolean flag indicating whether to use GPU acceleration for the warping operation.
+     * @param useGPU Non-zero to use GPU acceleration for the warping operation, 0 for CPU.
      */
-    CUSIFT_API void WarpImages(const Image_t *image1, const Image_t *image2, const float *homography, Image_t *warped_image1, Image_t *warped_image2, bool useGPU);
+    CUSIFT_API void WarpImages(const Image_t *image1, const Image_t *image2, const float *homography, Image_t *warped_image1, Image_t *warped_image2, int useGPU);
 
     /**
      * @brief Given the computed homography, warp the input images to align them using GPU acceleration.
@@ -358,9 +359,9 @@ extern "C"
     /**
      * @brief Delete a SiftData structure and free all associated resources. After calling this function, the SiftData pointer should not be used again unless it is re-initialized. The caller is responsible for ensuring that the SiftData structure was properly initialized and contains valid data before calling this function.
      *
-     * @param sift_data Pointer to the SiftData structure to be deleted.
+     * @param handle Handle to the SiftData to be deleted. The handle is invalidated after this call.
      */
-    CUSIFT_API void DeleteSiftData(SiftData *sift_data);
+    CUSIFT_API void DeleteSiftData(CusiftSiftHandle handle);
 
     /**
      * @brief Free the pixel buffer owned by an Image_t structure.
@@ -390,42 +391,42 @@ extern "C"
      * @brief Save SIFT features from a SiftData structure to a json file.
      *
      * @param filename Pointer to the name of the file where the SIFT features will be saved.
-     * @param sift_data Pointer to the SiftData structure containing the SIFT features to be saved.
+     * @param handle Handle to the SiftData containing the SIFT features to be saved.
      */
-    CUSIFT_API void SaveSiftData(const char *filename, const SiftData *sift_data);
+    CUSIFT_API void SaveSiftData(const char *filename, CusiftSiftHandle handle);
 
     /**
      * @brief Extract Sift features from two images and match them. This is a convenience function that combines ExtractSiftFromImage() and MatchSiftData() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
      *
      * @param image1 Pointer to the first input image.
      * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+     * @param out_handle1 Pointer to a CusiftSiftHandle that will receive the handle for the first image's features.
+     * @param out_handle2 Pointer to a CusiftSiftHandle that will receive the handle for the second image's features.
      * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
      */
-    CUSIFT_API void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options);
+    CUSIFT_API void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, const ExtractSiftOptions_t *extract_options);
 
     /**
      * @brief Extract Sift features from two images, match them, and find a homography transformation between the matched features. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), and FindHomography() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
      *
      * @param image1 Pointer to the first input image.
      * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+     * @param out_handle1 Pointer to a CusiftSiftHandle that will receive the handle for the first image's features.
+     * @param out_handle2 Pointer to a CusiftSiftHandle that will receive the handle for the second image's features.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
      * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
      * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
      */
-    CUSIFT_API void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
+    CUSIFT_API void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
 
     /**
     * @brief Extract Sift features from two images, match them, and find a homography transformation between the matched features using GPU acceleration. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), and FindHomography() into a single call, with GPU acceleration for all stages. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
     *
     * @param image1 Pointer to the first input image.
     * @param image2 Pointer to the second input image.
-    * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-    * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+    * @param out_handle1 Pointer to a CusiftSiftHandle that will receive the handle for the first image's features.
+    * @param out_handle2 Pointer to a CusiftSiftHandle that will receive the handle for the second image's features.
     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
@@ -433,7 +434,7 @@ extern "C"
     * @param num_homography_attempts Integer specifying the number of homography estimation attempts to perform. The library will run the homography estimation process multiple times with different random seeds and return the best result based on the number of inliers or the average inlier error. This can improve robustness against outliers and increase the chances of finding a good homography, especially in challenging scenarios with few matches or high noise. Set this to 1 for a single attempt (default), or higher for more attempts at the cost of increased computation time.
     * @param homography_goal Integer specifying the goal for homography estimation. Use CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS to maximize the number of inliers, or CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF to minimize the difference between the 2x2 submatrix of the homography and the identity matrix, giving more wiegth to homographies that minimize rotation shear and scale.
     */
-    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, int num_homography_attempts, int homography_goal);
+    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, int num_homography_attempts, int homography_goal);
 
     /**
      * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done.
@@ -441,8 +442,8 @@ extern "C"
      *
      * @param image1 Pointer to the first input image.
      * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+     * @param out_handle1 Pointer to a CusiftSiftHandle that will receive the handle for the first image's features.
+     * @param out_handle2 Pointer to a CusiftSiftHandle that will receive the handle for the second image's features.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
      * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
@@ -450,7 +451,7 @@ extern "C"
      * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
      * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
      */
-    CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2);
+    CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2);
 
     /**
      * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them using GPU acceleration.
@@ -459,8 +460,8 @@ extern "C"
      * 
      * @param image1 Pointer to the first input image.
      * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+     * @param out_handle1 Pointer to a CusiftSiftHandle that will receive the handle for the first image's features.
+     * @param out_handle2 Pointer to a CusiftSiftHandle that will receive the handle for the second image's features.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
      * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
@@ -469,7 +470,7 @@ extern "C"
      * @param warped_image2 Pointer to the ImageStrided_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
      * 
      */
-    CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2);
+    CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2);
 
     /**
      * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done.
@@ -477,8 +478,8 @@ extern "C"
      *
      * @param image1 Pointer to the first input image.
      * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
+     * @param out_handle1 Pointer to a CusiftSiftHandle that will receive the handle for the first image's features.
+     * @param out_handle2 Pointer to a CusiftSiftHandle that will receive the handle for the second image's features.
      * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
      * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
      * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
@@ -488,7 +489,7 @@ extern "C"
      * @param num_homography_attempts Integer specifying the number of homography estimation attempts to perform. The library will run the homography estimation process multiple times with different random seeds and return the best result based on the number of inliers or the average inlier error. This can improve robustness against outliers and increase the chances of finding a good homography, especially in challenging scenarios with few matches or high noise. Set this to 1 for a single attempt (default), or higher for more attempts at the cost of increased computation time.
      * @param homography_goal Integer specifying the goal for homography estimation. Use CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS to maximize the number of inliers, or CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF to minimize the difference between the 2x2 submatrix of the homography and the identity matrix, giving more wiegth to homographies that minimize rotation shear and scale.
      */
-    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal);
+    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, CusiftSiftHandle *out_handle1, CusiftSiftHandle *out_handle2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal);
 
     // ── VRAM estimation functions ────────────────────────────────────────
 
@@ -504,7 +505,7 @@ extern "C"
      * @param options       Extraction options (max_keypoints_ and num_octaves_ are used).
      * @return Estimated peak VRAM in bytes.
      */
-    CUSIFT_API size_t EstimateVramExtractSift(int image_width, int image_height, const ExtractSiftOptions_t *options);
+    CUSIFT_API unsigned long long EstimateVramExtractSift(int image_width, int image_height, const ExtractSiftOptions_t *options);
 
     /**
      * @brief Estimate the GPU VRAM occupied by two SiftData arrays during matching.
@@ -516,7 +517,7 @@ extern "C"
      * @param max_keypoints2 Maximum keypoints allocated for the second SiftData.
      * @return Estimated VRAM in bytes.
      */
-    CUSIFT_API size_t EstimateVramMatchSift(int max_keypoints1, int max_keypoints2);
+    CUSIFT_API unsigned long long EstimateVramMatchSift(int max_keypoints1, int max_keypoints2);
 
     /**
      * @brief Estimate the GPU VRAM needed by FindHomography().
@@ -529,7 +530,7 @@ extern "C"
      * @param options       Homography options (num_loops_ is used).
      * @return Estimated VRAM in bytes.
      */
-    CUSIFT_API size_t EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions_t *options);
+    CUSIFT_API unsigned long long EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions_t *options);
 
     /**
      * @brief Estimate the GPU VRAM needed by WarpImages() (GPU path) or WarpImages_GPU().
@@ -544,7 +545,7 @@ extern "C"
      * @param image_height2  Height of the second input image.
      * @return Estimated peak VRAM in bytes.
      */
-    CUSIFT_API size_t EstimateVramWarpImages(int image_width1, int image_height1, int image_width2, int image_height2);
+    CUSIFT_API unsigned long long EstimateVramWarpImages(int image_width1, int image_height1, int image_width2, int image_height2);
 
     /**
      * @brief Estimate the peak GPU VRAM across the full extract-match-homography-warp pipeline.
@@ -561,7 +562,36 @@ extern "C"
      * @param homography_options Homography options.
      * @return Estimated peak VRAM in bytes.
      */
-    CUSIFT_API size_t EstimateVramFullPipeline(int image_width1, int image_height1, int image_width2, int image_height2, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
+    CUSIFT_API unsigned long long EstimateVramFullPipeline(int image_width1, int image_height1, int image_width2, int image_height2, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
+
+    // ── Accessor functions ───────────────────────────────────────────────
+
+    /**
+     * @brief Get the number of SIFT keypoints stored in a handle.
+     *
+     * @param handle Handle to the SiftData.
+     * @return Number of keypoints, or 0 if the handle is invalid.
+     */
+    CUSIFT_API int CusiftGetNumPoints(CusiftSiftHandle handle);
+
+    /**
+     * @brief Copy a single SIFT keypoint from a handle into a caller-owned
+     *        SiftPoint structure.
+     *
+     * @param handle Handle to the SiftData.
+     * @param index  Zero-based index of the keypoint to retrieve.
+     * @param out    Pointer to a SiftPoint that receives the data.
+     */
+    CUSIFT_API void CusiftGetSiftPoint(CusiftSiftHandle handle, int index, SiftPoint *out);
+
+    /**
+     * @brief Release all SiftData handles and free their associated resources.
+     *
+     * This is a convenience function for cleanup, e.g. when unloading the
+     * library from MATLAB.  After this call every previously issued handle
+     * is invalid.
+     */
+    CUSIFT_API void CusiftDeleteAllSiftData(void);
 
 #ifdef __cplusplus
 }
