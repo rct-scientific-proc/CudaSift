@@ -502,13 +502,18 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
             {
                 atomicMax(&d_PointCounter[2 * octave + 0], d_PointCounter[2 * octave - 1]);
                 unsigned int idx = atomicInc(&d_PointCounter[2 * octave + 0], 0x7fffffff);
-                idx = (idx >= maxPts ? maxPts - 1 : idx);
-                d_Sift[idx].xpos = xpos + pdx;
-                d_Sift[idx].ypos = ypos + pdy;
-                d_Sift[idx].scale = sc;
-                d_Sift[idx].sharpness = val + dval;
-                d_Sift[idx].edgeness = edge;
-                d_Sift[idx].subsampling = subsampling;
+                // Skip writes once the buffer is full so multiple overflowing
+                // threads don't race to the same SiftPoint slot and produce a
+                // torn record. ComputeOrientationsCONST uses the same pattern.
+                if (idx < (unsigned int)maxPts)
+                {
+                    d_Sift[idx].xpos = xpos + pdx;
+                    d_Sift[idx].ypos = ypos + pdy;
+                    d_Sift[idx].scale = sc;
+                    d_Sift[idx].sharpness = val + dval;
+                    d_Sift[idx].edgeness = edge;
+                    d_Sift[idx].subsampling = subsampling;
+                }
             }
         }
     }
