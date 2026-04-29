@@ -460,6 +460,13 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
     {
         int xpos = points[2 * tx + 0];
         int ypos = points[2 * tx + 1];
+        // The Hessian / first-derivative stencil below dereferences
+        // data1[-1], data1[+1], data1[-pitch], data1[+pitch],
+        // data1[+/-pitch+/-1].  Skip border points so we don't read
+        // outside the valid (non-pad) image region or cross row
+        // boundaries through the pitch padding.
+        if (xpos < 1 || xpos >= width - 1 || ypos < 1 || ypos >= height - 1)
+            return;
         int ptr = xpos + (ypos + (scale + 1) * height) * pitch;
         float val = d_Data0[ptr];
         float *data1 = &d_Data0[ptr];
