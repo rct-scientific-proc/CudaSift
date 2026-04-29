@@ -49,7 +49,7 @@ src/
     matching.cu              Descriptor matching + RANSAC kernels
     geomFuncs.{c,h}          AVX2/FMA host-side IRLS homography refinement
     cudautils.h              Error handling, warp-shuffle helpers
-    RAII_Gaurds.hpp          Device/host pointer guards
+    RAII_Guards.hpp          Device/host pointer guards
     cudaSift.h               Internal aggregate header
 test/
     main.cpp                 17-test correctness/regression suite

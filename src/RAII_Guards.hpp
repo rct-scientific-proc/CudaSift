@@ -1,6 +1,6 @@
 #pragma once
-#ifndef RAII_GAURDS_HPP
-#define RAII_GAURDS_HPP
+#ifndef RAII_GUARDS_HPP
+#define RAII_GUARDS_HPP
 
 #include "cudaImage.h"
 #include "cusift.h"
@@ -118,4 +118,4 @@ public:
 
 
 
-#endif /* RAII_GAURDS_HPP */
+#endif /* RAII_GUARDS_HPP */

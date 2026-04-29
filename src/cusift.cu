@@ -4,7 +4,7 @@
 #include "cudaSift.h"
 #include "cudaSiftH.h"
 #include "geomFuncs.h"
-#include "RAII_Gaurds.hpp"
+#include "RAII_Guards.hpp"
 
 #include <cuda_runtime.h>
 #include <iostream>
@@ -58,15 +58,17 @@ static __global__ void WarpDualKernel(
 // ── Thread-local error storage ──────────────────────────
 struct CusiftErrorState
 {
-    bool        had_error = false;
-    int         line      = 0;
+    bool        had_error  = false;
+    int         line       = 0;
+    cudaError_t cuda_error = cudaSuccess;
     std::string file;
     std::string message;
 
     void clear()
     {
-        had_error = false;
-        line      = 0;
+        had_error  = false;
+        line       = 0;
+        cuda_error = cudaSuccess;
         file.clear();
         message.clear();
     }
@@ -85,10 +87,11 @@ static void cusift_api_guard(F &&fn)
     }
     catch (const CusiftError &e)
     {
-        s_error.had_error = true;
-        s_error.file      = e.file;
-        s_error.line      = e.line;
-        s_error.message   = e.what();
+        s_error.had_error  = true;
+        s_error.file       = e.file;
+        s_error.line       = e.line;
+        s_error.message    = e.what();
+        s_error.cuda_error = e.cuda_error;
     }
     catch (const std::exception &e)
     {
@@ -134,6 +137,11 @@ void CusiftGetLastErrorString(int *line_number,
 int CusiftHadError()
 {
     return s_error.had_error ? 1 : 0;
+}
+
+int CusiftGetLastCudaError()
+{
+    return static_cast<int>(s_error.cuda_error);
 }
 
 void InitializeCudaSift()

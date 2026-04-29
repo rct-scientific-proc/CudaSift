@@ -156,6 +156,9 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
     lib.CusiftHadError.restype = c_int
     lib.CusiftHadError.argtypes = []
 
+    lib.CusiftGetLastCudaError.restype = c_int
+    lib.CusiftGetLastCudaError.argtypes = []
+
     # Initialisation
     lib.InitializeCudaSift.restype = None
     lib.InitializeCudaSift.argtypes = []

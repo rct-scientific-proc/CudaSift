@@ -114,6 +114,24 @@ extern "C"
     CUSIFT_API int CusiftHadError(void);
 
     /**
+     * @brief Return the underlying CUDA error code from the most recent library
+     *        call, cast to @c int (matching the @c cudaError_t enum values).
+     *
+     * Returns 0 (== @c cudaSuccess) when:
+     *   - no error occurred, or
+     *   - the error originated outside of CUDA (e.g. invalid arguments,
+     *     non-finite homography, file-I/O failure in SaveSiftData).
+     *
+     * To distinguish "no error" from "non-CUDA error", check
+     * @ref CusiftHadError() first.
+     *
+     * The returned integer is suitable for casting back to @c cudaError_t in
+     * a translation unit that includes @c <cuda_runtime.h>, but the public
+     * header intentionally avoids that dependency.
+     */
+    CUSIFT_API int CusiftGetLastCudaError(void);
+
+    /**
      * @brief A single SIFT keypoint with its 128-d descriptor.
      */
     typedef struct

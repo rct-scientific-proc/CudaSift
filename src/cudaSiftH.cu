@@ -17,7 +17,7 @@
 #include "cudaSift.h"
 #include "cudaSiftD.h"
 #include "cudaSiftH.h"
-#include "RAII_Gaurds.hpp"
+#include "RAII_Guards.hpp"
 
 #include "cudaSiftD.cu"
 

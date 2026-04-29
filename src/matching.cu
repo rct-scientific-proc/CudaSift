@@ -1,6 +1,6 @@
 #include "cudaSift.h"
 #include "cudautils.h"
-#include "RAII_Gaurds.hpp"
+#include "RAII_Guards.hpp"
 
 #include <cmath>
 #include <random>
