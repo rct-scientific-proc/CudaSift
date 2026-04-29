@@ -107,19 +107,27 @@ static void cusift_api_guard(F &&fn)
     }
 }
 
-void CusiftGetLastErrorString(int *line_number, char filename[256], char error_message[256])
+void CusiftGetLastErrorString(int *line_number,
+                              char *filename, size_t filename_size,
+                              char *error_message, size_t error_message_size)
 {
     if (line_number)
         *line_number = s_error.line;
-    if (filename)
+    if (filename && filename_size > 0)
     {
-        strncpy(filename, s_error.file.c_str(), 255);
-        filename[255] = '\0';
+        const std::string &src = s_error.file;
+        size_t n = src.size();
+        if (n >= filename_size) n = filename_size - 1;
+        memcpy(filename, src.data(), n);
+        filename[n] = '\0';
     }
-    if (error_message)
+    if (error_message && error_message_size > 0)
     {
-        strncpy(error_message, s_error.message.c_str(), 255);
-        error_message[255] = '\0';
+        const std::string &src = s_error.message;
+        size_t n = src.size();
+        if (n >= error_message_size) n = error_message_size - 1;
+        memcpy(error_message, src.data(), n);
+        error_message[n] = '\0';
     }
 }
 

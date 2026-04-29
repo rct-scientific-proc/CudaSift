@@ -49,9 +49,9 @@ def _check_error(lib: ctypes.CDLL) -> None:
     """Query the library error flag; raise :class:`CuSiftError` if set."""
     if lib.CusiftHadError():
         line = c_int(0)
-        fname = (ctypes.c_char * 256)()
-        msg = (ctypes.c_char * 256)()
-        lib.CusiftGetLastErrorString(byref(line), fname, msg)
+        fname = ctypes.create_string_buffer(256)
+        msg = ctypes.create_string_buffer(256)
+        lib.CusiftGetLastErrorString(byref(line), fname, len(fname), msg, len(msg))
         raise CuSiftError(
             msg.value.decode("utf-8", errors="replace"),
             filename=fname.value.decode("utf-8", errors="replace"),

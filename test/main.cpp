@@ -36,7 +36,7 @@ static bool check_error(const char* test_name)
     {
         char error_str[256], filename[256];
         int line_number;
-        CusiftGetLastErrorString(&line_number, filename, error_str);
+        CusiftGetLastErrorString(&line_number, filename, sizeof(filename), error_str, sizeof(error_str));
         std::cerr << "  [FAIL] " << test_name << ": " << error_str << std::endl;
         return true;
     }

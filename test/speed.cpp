@@ -73,7 +73,7 @@ static bool check_error(const char* label)
     {
         char err[256], file[256];
         int line;
-        CusiftGetLastErrorString(&line, file, err);
+        CusiftGetLastErrorString(&line, file, sizeof(file), err, sizeof(err));
         std::cerr << "  ERROR in " << label << ": " << err << std::endl;
         return true;
     }

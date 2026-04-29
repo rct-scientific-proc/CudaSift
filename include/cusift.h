@@ -59,6 +59,8 @@
 #ifndef CUSIFT_H
 #define CUSIFT_H
 
+#include <stddef.h>  /* size_t */
+
 // -- Export / import macros ------------------------------
 #ifdef CUSIFT_STATIC
 #define CUSIFT_API
@@ -82,16 +84,24 @@ extern "C"
 
     /**
      * @brief Return the last error from the library, including file, line, and
-     *        human-readable message.  All three output parameters are optional
-     *        (pass NULL to skip).
+     *        human-readable message.  All output parameters are optional
+     *        (pass NULL / 0 to skip).
      *
-     * @param line_number  Receives the source line where the error originated.
-     * @param filename     256-char buffer that receives the source filename.
-     * @param error_message 256-char buffer that receives the error description.
+     * The strings written to @p filename and @p error_message are always
+     * NUL-terminated and are truncated if the destination buffers are
+     * smaller than the source string.
+     *
+     * @param line_number       Receives the source line where the error originated.
+     * @param filename          Buffer that receives the source filename.
+     * @param filename_size     Size in bytes of @p filename.
+     * @param error_message     Buffer that receives the error description.
+     * @param error_message_size Size in bytes of @p error_message.
      */
     CUSIFT_API void CusiftGetLastErrorString(int *line_number,
-                                             char filename[256],
-                                             char error_message[256]);
+                                             char *filename,
+                                             size_t filename_size,
+                                             char *error_message,
+                                             size_t error_message_size);
 
     /**
      * @brief Check whether the most recent library call encountered an error.

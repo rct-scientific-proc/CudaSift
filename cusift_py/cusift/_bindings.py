@@ -147,8 +147,10 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
     lib.CusiftGetLastErrorString.restype = None
     lib.CusiftGetLastErrorString.argtypes = [
         POINTER(c_int),
-        c_char * 256,
-        c_char * 256,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
     ]
 
     lib.CusiftHadError.restype = c_int

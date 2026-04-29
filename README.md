@@ -169,7 +169,7 @@ int main()
 
     if (CusiftHadError()) {
         int line; char file[256], msg[256];
-        CusiftGetLastErrorString(&line, file, msg);
+        CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
         std::fprintf(stderr, "%s:%d  %s\n", file, line, msg);
         return 1;
     }
@@ -246,7 +246,7 @@ the thread-local error flag on entry; check it after the call:
 ```c
 if (CusiftHadError()) {
     int line; char file[256], msg[256];
-    CusiftGetLastErrorString(&line, file, msg);
+    CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
     /* report and recover */
 }
 ```
