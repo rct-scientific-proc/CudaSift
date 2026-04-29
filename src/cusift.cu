@@ -18,13 +18,11 @@
 #include <random>
 #include <omp.h>
 
-#define ERROR(msg) __throw_error(__FILE__, __LINE__, msg)
+#define ERROR(msg) cusift_throw_error(__FILE__, __LINE__, msg)
 
-static void __throw_error(const char *file, int line, const char *msg)
+static void cusift_throw_error(const char *file, int line, const char *msg)
 {
-    std::ostringstream ss;
-    ss << "\nError in file '" << file << "' in line " << line << " : " << msg;
-    throw std::runtime_error(ss.str());
+    throw CusiftError(file, line, msg);
 }
 
 static int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
@@ -72,35 +70,6 @@ struct CusiftErrorState
         file.clear();
         message.clear();
     }
-
-    // Parse file/line from __safeCall message format:
-    //   "CUDA error in file 'FILE' in line LINE : MSG"
-    void store_from_exception(const char *what)
-    {
-        had_error = true;
-        message   = what;
-
-        const char *file_start = strstr(what, "in file '");
-        const char *line_start = strstr(what, "in line ");
-
-        if (file_start && line_start)
-        {
-            file_start += 9; // skip "in file '"
-            const char *file_end = strchr(file_start, '\'');
-            if (file_end)
-                file.assign(file_start, file_end);
-            else
-                file.clear();
-
-            line_start += 8; // skip "in line "
-            line = atoi(line_start);
-        }
-        else
-        {
-            file.clear();
-            line = 0;
-        }
-    }
 };
 
 static thread_local CusiftErrorState s_error;
@@ -114,16 +83,27 @@ static void cusift_api_guard(F &&fn)
     {
         fn();
     }
+    catch (const CusiftError &e)
+    {
+        s_error.had_error = true;
+        s_error.file      = e.file;
+        s_error.line      = e.line;
+        s_error.message   = e.what();
+    }
     catch (const std::exception &e)
     {
-        s_error.store_from_exception(e.what());
+        // STL/host exceptions (e.g. std::bad_alloc) lack source location.
+        s_error.had_error = true;
+        s_error.line      = 0;
+        s_error.file.clear();
+        s_error.message   = e.what();
     }
     catch (...)
     {
         s_error.had_error = true;
         s_error.line      = 0;
         s_error.file.clear();
-        s_error.message = "Unknown exception";
+        s_error.message   = "Unknown exception";
     }
 }
 
@@ -155,10 +135,7 @@ void InitializeCudaSift()
         int nDevices;
         safeCall(cudaGetDeviceCount(&nDevices));
         if (!nDevices)
-        {
-            std::cerr << "No CUDA devices available" << std::endl;
-            return;
-        }
+            ERROR("No CUDA devices available");
         int devNum = std::min(nDevices - 1, 0);
         safeCall(cudaSetDevice(devNum));
     });
@@ -188,11 +165,6 @@ void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const Extra
         int minDim = std::min(image->width_, image->height_);
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(options->num_octaves_, maxOctaves);
-        if (options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         // Limit num octaves to 7, quietly
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3); // Ensure at least 3 octaves
@@ -288,20 +260,16 @@ void FreeImage_GPU(ImageStrided_t *image)
 
 void SaveSiftData(const char *filename, const SiftData *sift_data)
 {
-    if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
+    cusift_api_guard([&]()
     {
-        std::cerr << "SaveSiftData: no data to save" << std::endl;
-        return;
-    }
+        if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
+            ERROR("SaveSiftData: no data to save");
 
-    FILE *f = fopen(filename, "w");
-    if (!f)
-    {
-        std::cerr << "SaveSiftData: could not open file " << filename << std::endl;
-        return;
-    }
+        FILE *f = fopen(filename, "w");
+        if (!f)
+            ERROR("SaveSiftData: could not open file for writing");
 
-    fprintf(f, "{\n");
+        fprintf(f, "{\n");
     fprintf(f, "  \"num_keypoints\": %d,\n", sift_data->numPts);
     fprintf(f, "  \"keypoints\": [\n");
 
@@ -335,6 +303,7 @@ void SaveSiftData(const char *filename, const SiftData *sift_data)
     fprintf(f, "  ]\n");
     fprintf(f, "}\n");
     fclose(f);
+    });
 }
 
 void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options)
@@ -351,11 +320,6 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
         int minDim = std::min({image1->width_, image1->height_, image2->width_, image2->height_});
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-        if (extract_options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         // Limit num octaves to 7, quietly
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3); // Ensure at least 3 octaves
@@ -408,11 +372,6 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
         int minDim = std::min({image1->width_, image1->height_, image2->width_, image2->height_});
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-        if (extract_options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         // Limit num octaves to 7, quietly
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3); // Ensure at least 3 octaves
@@ -496,11 +455,6 @@ void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t
         int minDim = std::min({image1->width_, image1->height_, image2->width_, image2->height_});
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-        if (extract_options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         // Limit num octaves to 7, quietly
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3); // Ensure at least 3 octaves
@@ -1025,11 +979,6 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         int minDim = std::min({w1, h1, w2, h2});
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-        if (extract_options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         // Limit num octaves to 7, quietly
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3); // Ensure at least 3 octaves
@@ -1213,11 +1162,6 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
         int minDim = std::min({w1, h1, w2, h2});
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-        if (extract_options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3);
 
@@ -1387,11 +1331,6 @@ void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const
         int minDim = std::min({w1, h1, w2, h2});
         int maxOctaves = static_cast<int>(std::floor(std::log2(minDim))) - 3;
         int octaves = std::min(extract_options->num_octaves_, maxOctaves);
-        if (extract_options->num_octaves_ > maxOctaves)
-        {
-            std::cerr << "Warning: Requested number of octaves (" << extract_options->num_octaves_ << ") exceeds the maximum possible (" << maxOctaves << ") for the given image size. Reducing to " << maxOctaves << "." << std::endl;
-        }
-
         octaves = std::min(octaves, 7);
         octaves = std::max(octaves, 3);
 

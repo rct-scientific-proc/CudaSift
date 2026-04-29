@@ -11,40 +11,56 @@
 #include <intrin.h>
 #endif
 
-#define safeCall(err) __safeCall(err, __FILE__, __LINE__)
-#define safeThreadSync() __safeThreadSync(__FILE__, __LINE__)
-#define checkMsg(msg) __checkMsg(msg, __FILE__, __LINE__)
+// Exception type used internally by the library.  Carries the originating
+// source file/line and (when applicable) the underlying CUDA error code so
+// the public API guard can populate the thread-local error state without
+// re-parsing message strings.
+struct CusiftError : public std::runtime_error
+{
+    std::string file;
+    int         line;
+    cudaError_t cuda_error;
 
-inline void __safeCall(cudaError err, const char *file, const int line)
+    CusiftError(std::string f, int l, const std::string &msg, cudaError_t ce = cudaSuccess)
+        : std::runtime_error(msg), file(std::move(f)), line(l), cuda_error(ce) {}
+};
+
+#define safeCall(err) cusift_safe_call(err, __FILE__, __LINE__)
+#define safeThreadSync() cusift_safe_thread_sync(__FILE__, __LINE__)
+#define checkMsg(msg) cusift_check_msg(msg, __FILE__, __LINE__)
+
+inline void cusift_safe_call(cudaError err, const char *file, const int line)
 {
     if (cudaSuccess != err)
     {
-        // Throw a runtime error with the error message, line number, and filename
         std::ostringstream oss;
-        oss << "CUDA error in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
-        throw std::runtime_error(oss.str());
+        oss << "CUDA error: " << cudaGetErrorString(err);
+        throw CusiftError(file, line, oss.str(), err);
     }
 }
 
-inline void __safeThreadSync(const char *file, const int line)
+inline void cusift_safe_thread_sync(const char *file, const int line)
 {
     cudaError err = cudaDeviceSynchronize();
     if (cudaSuccess != err)
     {
         std::ostringstream oss;
-        oss << "CUDA error during cudaDeviceSynchronize() in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
-        throw std::runtime_error(oss.str());
+        oss << "CUDA error during cudaDeviceSynchronize(): " << cudaGetErrorString(err);
+        throw CusiftError(file, line, oss.str(), err);
     }
 }
 
-inline void __checkMsg(const char *errorMessage, const char *file, const int line)
+inline void cusift_check_msg(const char *errorMessage, const char *file, const int line)
 {
-    cudaError_t err = cudaPeekAtLastError();
+    // Use cudaGetLastError() (not cudaPeekAtLastError()) so the sticky
+    // last-error flag is cleared after we observe it; otherwise every
+    // subsequent checkMsg() would keep reporting the same stale error.
+    cudaError_t err = cudaGetLastError();
     if (cudaSuccess != err)
     {
         std::ostringstream oss;
-        oss << "CUDA error: " << errorMessage << " in file '" << file << "' in line " << line << " : " << cudaGetErrorString(err);
-        throw std::runtime_error(oss.str());
+        oss << "CUDA error: " << errorMessage << " : " << cudaGetErrorString(err);
+        throw CusiftError(file, line, oss.str(), err);
     }
 }
 
