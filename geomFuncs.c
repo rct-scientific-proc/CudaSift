@@ -173,6 +173,14 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
             /* Binary weight */
             float wei = (err_sq <= limit) ? 1.0f : 0.0f;
 
+            /* Outliers contribute nothing (0 * Y * Y^T == 0); skip the
+             * 16 outer-product FMAs and 4 vector FMAs entirely.  This is
+             * numerically identical to the previous behaviour but cheaper,
+             * and after the first iteration with a marginal initial
+             * homography most points are outliers. */
+            if (wei == 0.0f)
+                continue;
+
             /* --- x-equation contribution --- */
             Y[0] = xp;  Y[1] = yp;  Y[2] = 1.0f;
             Y[3] = 0.0f; Y[4] = 0.0f; Y[5] = 0.0f;
@@ -204,8 +212,9 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
     {
         SiftPoint *pt = &mpts[i];
         float den = A[6] * pt->xpos + A[7] * pt->ypos + 1.0f;
-        float dx = (A[0] * pt->xpos + A[1] * pt->ypos + A[2]) / den - pt->match_xpos;
-        float dy = (A[3] * pt->xpos + A[4] * pt->ypos + A[5]) / den - pt->match_ypos;
+        float inv_den = 1.0f / den;
+        float dx = (A[0] * pt->xpos + A[1] * pt->ypos + A[2]) * inv_den - pt->match_xpos;
+        float dy = (A[3] * pt->xpos + A[4] * pt->ypos + A[5]) * inv_den - pt->match_ypos;
         float err = dx * dx + dy * dy;
         if (err < limit)
             numfit++;
