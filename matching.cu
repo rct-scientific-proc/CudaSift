@@ -50,7 +50,15 @@ __global__ void FindMaxCorr10(SiftPoint *sift1, SiftPoint *sift2, int numPts1, i
     int idx = ty * M7W + tx;
     int ix = idx % (M7W / NRX);
     int iy = idx / (M7W / NRX);
-    for (int bp2 = 0; bp2 < numPts2 - M7H + 1; bp2 += M7H)
+    // Iterate over every M7H-sized chunk of sift2.  Using
+    // `bp2 < numPts2 - M7H + 1` left up to (M7H-1) trailing descriptors
+    // unmatched, and -- because the comparison is signed -- skipped the
+    // loop entirely when numPts2 < M7H, producing zero matches.  The
+    // buffer2 load and the `index` write already clamp with
+    // min(..., numPts2 - 1), so over-iterating just rescores the last
+    // descriptor against itself (same value, same clamped index) and
+    // does not bias the result.
+    for (int bp2 = 0; bp2 < numPts2; bp2 += M7H)
     {
         for (int j = ty; j < M7H; j += M7H / M7R)
         {
@@ -690,12 +698,10 @@ double MatchSiftData_private(SiftData *data1, SiftData *data2)
     SiftPoint *sift1 = data1->d_data;
     SiftPoint *sift2 = data2->d_data;
 
-    dim3 blocksMax3(iDivUp(numPts1, 16), iDivUp(numPts2, 512));
-    dim3 threadsMax3(16, 16);
     CleanMatches<<<iDivUp(numPts1, 64), 64>>>(sift1, numPts1);
-        blocksMax3 = dim3(iDivUp(numPts1, M7W));
-        threadsMax3 = dim3(M7W, M7H / M7R);
-        FindMaxCorr10<<<blocksMax3, threadsMax3>>>(sift1, sift2, numPts1, numPts2);
+    dim3 blocksMax3(iDivUp(numPts1, M7W));
+    dim3 threadsMax3(M7W, M7H / M7R);
+    FindMaxCorr10<<<blocksMax3, threadsMax3>>>(sift1, sift2, numPts1, numPts2);
     safeCall(cudaDeviceSynchronize());
     checkMsg("FindMaxCorr10() execution failed\n");
 
