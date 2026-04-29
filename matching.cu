@@ -335,13 +335,17 @@ __global__ void TestHomographies(float *d_coord, float *d_homo,
         float y1 = d_coord[i + 1 * numPts];
         float x2 = d_coord[i + 2 * numPts];
         float y2 = d_coord[i + 3 * numPts];
-        float nomx = __fmul_rz(a[0], x1) + __fmul_rz(a[1], y1) + a[2];
-        float nomy = __fmul_rz(a[3], x1) + __fmul_rz(a[4], y1) + a[5];
-        float deno = __fmul_rz(a[6], x1) + __fmul_rz(a[7], y1) + 1.0f;
-        float errx = __fmul_rz(x2, deno) - nomx;
-        float erry = __fmul_rz(y2, deno) - nomy;
-        float err2 = __fmul_rz(errx, errx) + __fmul_rz(erry, erry);
-        if (err2 < __fmul_rz(thresh2, __fmul_rz(deno, deno)))
+        // Use round-to-nearest (default IEEE) intrinsics for the
+        // residual.  The previous round-toward-zero variants
+        // (__fmul_rz / __fmaf_rz) systematically shrank the projection
+        // magnitude, biasing the inlier/outlier decision.
+        float nomx = __fmaf_rn(a[0], x1, __fmaf_rn(a[1], y1, a[2]));
+        float nomy = __fmaf_rn(a[3], x1, __fmaf_rn(a[4], y1, a[5]));
+        float deno = __fmaf_rn(a[6], x1, __fmaf_rn(a[7], y1, 1.0f));
+        float errx = __fmaf_rn(x2, deno, -nomx);
+        float erry = __fmaf_rn(y2, deno, -nomy);
+        float err2 = __fmaf_rn(errx, errx, __fmul_rn(erry, erry));
+        if (err2 < __fmul_rn(thresh2, __fmul_rn(deno, deno)))
             cnt++;
     }
     int kty = TESTHOMO_TESTS * ty;
@@ -496,13 +500,13 @@ __global__ void ComputeSimilarities(float *coord, int *randPts, float *sims,
     float dx2 = x2b - x2a;
     float dy2 = y2b - y2a;
 
-    float det = __fmaf_rz(dx1, dx1, __fmul_rz(dy1, dy1));
+    float det = __fmaf_rn(dx1, dx1, __fmul_rn(dy1, dy1));
     float inv_det = (det > 1e-12f) ? __frcp_rn(det) : 0.0f;
 
-    float a  = __fmul_rz(__fmaf_rz(dx1, dx2, __fmul_rz(dy1, dy2)), inv_det);
-    float b  = __fmul_rz(__fmaf_rz(dx1, dy2, -__fmul_rz(dy1, dx2)), inv_det);
-    float tx = __fmaf_rz(-a, x1a, __fmaf_rz(b, y1a, x2a));
-    float ty = __fmaf_rz(-b, x1a, __fmaf_rz(-a, y1a, y2a));
+    float a  = __fmul_rn(__fmaf_rn(dx1, dx2, __fmul_rn(dy1, dy2)), inv_det);
+    float b  = __fmul_rn(__fmaf_rn(dx1, dy2, -__fmul_rn(dy1, dx2)), inv_det);
+    float tx = __fmaf_rn(-a, x1a, __fmaf_rn(b, y1a, x2a));
+    float ty = __fmaf_rn(-b, x1a, __fmaf_rn(-a, y1a, y2a));
 
     sims[0 * numLoops + idx] = a;
     sims[1 * numLoops + idx] = b;
@@ -541,11 +545,11 @@ __global__ void TestSimilarities(float *d_coord, float *d_sims,
         float y1 = d_coord[i + 1 * numPts];
         float x2 = d_coord[i + 2 * numPts];
         float y2 = d_coord[i + 3 * numPts];
-        float px = __fmaf_rz(a, x1, __fmaf_rz(-b, y1, stx));
-        float py = __fmaf_rz(b, x1, __fmaf_rz(a, y1, sty));
+        float px = __fmaf_rn(a, x1, __fmaf_rn(-b, y1, stx));
+        float py = __fmaf_rn(b, x1, __fmaf_rn(a, y1, sty));
         float errx = x2 - px;
         float erry = y2 - py;
-        float err2 = __fmaf_rz(errx, errx, __fmul_rz(erry, erry));
+        float err2 = __fmaf_rn(errx, errx, __fmul_rn(erry, erry));
         if (err2 < thresh2)
             cnt++;
     }
