@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.23)
 
 project(cudaSift
-  VERSION 2.0.0
+  VERSION 2.1.0
   LANGUAGES C CXX CUDA
 )
 
