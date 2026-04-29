@@ -542,11 +542,32 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
 __global__ void LaplaceMultiMem(float *d_Image, float *d_Result, int width, int pitch, int height, int octave, const float *__restrict__ d_LaplaceKernel)
 {
     __shared__ float buff[(LAPLACE_W + 2 * LAPLACE_R) * LAPLACE_S];
+    // The per-scale kernel weights used to live in a per-thread
+    // float kern[LAPLACE_S][LAPLACE_R + 1].  Because the second
+    // (scale) loop indexes that array with a runtime variable,
+    // nvcc was forced to spill the whole thing to local memory.
+    // Hoisting into shared memory keeps it in fast on-chip storage
+    // and lets every thread of the block share one copy.
+    __shared__ float kern[LAPLACE_S][LAPLACE_R + 1];
     const int tx = threadIdx.x;
     const int xp = blockIdx.x * LAPLACE_W + tx;
     const int yp = blockIdx.y;
     float *data = d_Image + max(min(xp - LAPLACE_R, width - 1), 0);
-    float temp[2 * LAPLACE_R + 1], kern[LAPLACE_S][LAPLACE_R + 1];
+    float temp[2 * LAPLACE_R + 1];
+    // Load the (LAPLACE_S * (LAPLACE_R + 1)) kernel coefficients once
+    // per block.  LAPLACE_S * (LAPLACE_R + 1) is small (e.g. 8*5 = 40)
+    // so a flat threadIdx.x stride covers it in 1-2 iterations.
+    {
+        const int kcount = LAPLACE_S * (LAPLACE_R + 1);
+        const float *kbase = d_LaplaceKernel + octave * 12 * 16;
+        for (int i = tx; i < kcount; i += blockDim.x)
+        {
+            int s = i / (LAPLACE_R + 1);
+            int j = i - s * (LAPLACE_R + 1);
+            kern[s][j] = kbase[s * 16 + j];
+        }
+    }
+    __syncthreads();
     if (xp < (width + 2 * LAPLACE_R))
     {
         for (int i = 0; i <= 2 * LAPLACE_R; i++)
@@ -554,9 +575,6 @@ __global__ void LaplaceMultiMem(float *d_Image, float *d_Result, int width, int 
         for (int scale = 0; scale < LAPLACE_S; scale++)
         {
             float *buf = buff + (LAPLACE_W + 2 * LAPLACE_R) * scale;
-            const float *kernel = d_LaplaceKernel + octave * 12 * 16 + scale * 16;
-            for (int i = 0; i <= LAPLACE_R; i++)
-                kern[scale][i] = kernel[i];
             float sum = kern[scale][0] * temp[LAPLACE_R];
 #pragma unroll
             for (int j = 1; j <= LAPLACE_R; j++)
