@@ -212,12 +212,12 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
             num_matches,
             options);
         
-        // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
+        // If any homography values are NaN or +/-inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
         for (int i = 0; i < 8; i++)
         {
             if (!std::isfinite(homography[i]))
             {
-                ERROR("Homograpy contains non-finite values");
+                ERROR("Homography contains non-finite values");
             }
         }
 
@@ -231,39 +231,38 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
     });
 }
 
+// Resource-cleanup functions (DeleteSiftData / FreeImage / FreeImage_GPU) do
+// NOT pass through cusift_api_guard.  Cleanup is destructor-safe (uses
+// cudaFree / free directly, never throws) and we deliberately leave the
+// thread-local error state untouched so the typical "do work; then free; then
+// check error" pattern still surfaces the original failure.
 void DeleteSiftData(SiftData *sift_data)
 {
-    // FreeSiftData uses cudaFree directly (not safeCall), so it is
-    // destructor-safe and won't throw.  We still wrap for consistency.
-    cusift_api_guard([&]()
-    {
+    if (sift_data)
         FreeSiftData(sift_data);
-    });
 }
 
 void FreeImage(Image_t *image)
 {
-    if (image)
-        if (image->host_img_)
-        {
-            free(image->host_img_);
-            image->host_img_ = nullptr;
-            image->width_ = 0;
-            image->height_ = 0;
-        }
+    if (image && image->host_img_)
+    {
+        free(image->host_img_);
+        image->host_img_ = nullptr;
+        image->width_ = 0;
+        image->height_ = 0;
+    }
 }
 
 void FreeImage_GPU(ImageStrided_t *image)
 {
-    if (image)
-        if (image->strided_img_)
-        {
-            cudaFree(image->strided_img_);
-            image->strided_img_ = nullptr;
-            image->width_ = 0;
-            image->height_ = 0;
-            image->stride_ = 0;
-        }
+    if (image && image->strided_img_)
+    {
+        cudaFree(image->strided_img_);
+        image->strided_img_ = nullptr;
+        image->width_ = 0;
+        image->height_ = 0;
+        image->stride_ = 0;
+    }
 }
 
 void SaveSiftData(const char *filename, const SiftData *sift_data)
@@ -420,12 +419,12 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
             sift_data1, homography, num_matches,
             homography_options);
         
-        // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
+        // If any homography values are NaN or +/-inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
         for (int i = 0; i < 8; i++)
         {
             if (!std::isfinite(homography[i]))
             {
-                ERROR("Homograpy contains non-finite values");
+                ERROR("Homography contains non-finite values");
             }
         }
 
@@ -1025,12 +1024,12 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
             sift_data1, homography, num_matches,
             homography_options);
         
-        // If any homography values are nan of inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
+        // If any homography values are NaN or +/-inf, we should throw an error rather than proceeding to the warp which will produce garbage output and may cause CUDA errors.
         for (int i = 0; i < 8; i++)
         {
             if (!std::isfinite(homography[i]))
             {
-                ERROR("Homograpy contains non-finite values");
+                ERROR("Homography contains non-finite values");
             }
         }
 
@@ -1211,7 +1210,7 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
         {
             if (!std::isfinite(homography[i]))
             {
-                ERROR("Homograpy contains non-finite values");
+                ERROR("Homography contains non-finite values");
             }
         }
 
