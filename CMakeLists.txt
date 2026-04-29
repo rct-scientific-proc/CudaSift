@@ -31,19 +31,22 @@ endif()
 
 # ── Source files ──────────────────────────────────────────
 set(CUDA_SOURCES
-  cudaImage.cu
-  cudaSiftH.cu
-  matching.cu
-  cusift.cu
+  src/cudaImage.cu
+  src/cudaSiftH.cu
+  src/matching.cu
+  src/cusift.cu
 )
 
 set(C_SOURCES
-  geomFuncs.c
+  src/geomFuncs.c
 )
 
 # ── CUDA object library (compiled by nvcc) ───────────────
 add_library(cusift_cuda OBJECT ${CUDA_SOURCES})
-target_include_directories(cusift_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(cusift_cuda PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 target_compile_definitions(cusift_cuda PRIVATE VERBOSE)
 
 if(MSVC)
@@ -81,8 +84,10 @@ endif()
 
 target_include_directories(cusift
   PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_compile_definitions(cusift PRIVATE VERBOSE)
@@ -90,10 +95,10 @@ target_compile_definitions(cusift PRIVATE VERBOSE)
 # C/C++ compile options (no COMPILE_LANGUAGE guards needed — only C sources in this target)
 if(MSVC)
   target_compile_options(cusift PRIVATE /W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
-  set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
   target_compile_options(cusift PRIVATE -Wall -Wextra -Wpedantic -O2)
-  set_source_files_properties(geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 endif()
 
 # Link CUDA runtime (needed since cusift itself has no .cu files)
@@ -131,7 +136,7 @@ install(TARGETS cusift_demo cusift_speed
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(FILES cusift.h
+install(FILES include/cusift.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
