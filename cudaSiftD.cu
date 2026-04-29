@@ -265,6 +265,15 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
 
     int fstPts = min(d_PointCounter[2 * octave - 1], d_MaxNumPoints);
     int totPts = min(d_PointCounter[2 * octave + 0], d_MaxNumPoints);
+    // Prime d_PointCounter[2*octave+1] so secondary-orientation appends
+    // (atomicInc below) don't overwrite primary features at indices in
+    // [fstPts, totPts).  FindPointsMultiNew left counter+1 at the previous
+    // octave's value.  Each block must do this before its first atomicInc
+    // because blocks are unordered; doing it once per block (instead of
+    // once per feature, as before) avoids serializing every feature
+    // through a global atomicMax.
+    if (tx == 0)
+        atomicMax(&d_PointCounter[2 * octave + 1], totPts);
     for (int bx = blockIdx.x + fstPts; bx < totPts; bx += gridDim.x)
     {
 
@@ -332,8 +341,7 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
             float val2 = hist[32 + ((i1 + 31) & 31)];
             float peak = i1 + 0.5f * (val1 - val2) / (2.0f * maxval1 - val1 - val2);
             d_Sift[bx].orientation = 11.25f * (peak < 0.0f ? peak + 32.0f : peak);
-            atomicMax(&d_PointCounter[2 * octave + 1], d_PointCounter[2 * octave + 0]);
-            if (maxval2 > 0.8f * maxval1 && true)
+            if (maxval2 > 0.8f * maxval1)
             {
                 float val1 = hist[32 + ((i2 + 1) & 31)];
                 float val2 = hist[32 + ((i2 + 31) & 31)];
@@ -507,7 +515,11 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
             float sc = powf(2.0f, (float)scale / NUM_SCALES) * exp2f(pds * factor);
             if (sc >= lowestScale && sc <= highestScale)
             {
-                atomicMax(&d_PointCounter[2 * octave + 0], d_PointCounter[2 * octave - 1]);
+                // The init-time atomicMax at the top of the kernel already
+                // primed d_PointCounter[2*octave] >= d_PointCounter[2*octave-1].
+                // Any further atomicInc keeps it monotonically increasing, so
+                // re-running atomicMax here is a no-op that just serializes
+                // every detection through global atomic memory.
                 unsigned int idx = atomicInc(&d_PointCounter[2 * octave + 0], 0x7fffffff);
                 // Skip writes once the buffer is full so multiple overflowing
                 // threads don't race to the same SiftPoint slot and produce a
