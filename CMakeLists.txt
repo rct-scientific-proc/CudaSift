@@ -17,6 +17,16 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
 option(CUSIFT_USE_FAST_MATH  "Compile CUDA code with --use_fast_math"             OFF)
 option(CUSIFT_ALL_CUDA_ARCHS "Build for all supported CUDA architectures"         OFF)
+option(CUSIFT_ENABLE_AVX2    "Compile geomFuncs.c with AVX2 + FMA (x86/x64 only)" ON)
+
+# Detect whether the host architecture even supports AVX2 / FMA. On non-x86
+# targets (e.g. arm64) the AVX2 path is unconditionally skipped, regardless
+# of CUSIFT_ENABLE_AVX2, and the C source falls back to its scalar path via
+# the preprocessor guards in src/geomFuncs.c.
+set(_CUSIFT_X86 FALSE)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|amd64|i[3-6]86|x86)")
+  set(_CUSIFT_X86 TRUE)
+endif()
 
 # ── OpenMP ───────────────────────────────────────────────
 find_package(OpenMP COMPONENTS C CXX)
@@ -95,10 +105,20 @@ target_compile_definitions(cusift PRIVATE VERBOSE)
 # C/C++ compile options (no COMPILE_LANGUAGE guards needed — only C sources in this target)
 if(MSVC)
   target_compile_options(cusift PRIVATE /W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
-  set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+  if(CUSIFT_ENABLE_AVX2 AND _CUSIFT_X86)
+    set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    message(STATUS "cusift: building geomFuncs.c with AVX2 + FMA (/arch:AVX2)")
+  else()
+    message(STATUS "cusift: building geomFuncs.c with scalar fallback (no AVX2)")
+  endif()
 else()
   target_compile_options(cusift PRIVATE -Wall -Wextra -Wpedantic -O2)
-  set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  if(CUSIFT_ENABLE_AVX2 AND _CUSIFT_X86)
+    set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+    message(STATUS "cusift: building geomFuncs.c with AVX2 + FMA (-mavx2 -mfma)")
+  else()
+    message(STATUS "cusift: building geomFuncs.c with scalar fallback (no AVX2)")
+  endif()
 endif()
 
 # Link CUDA runtime (needed since cusift itself has no .cu files)

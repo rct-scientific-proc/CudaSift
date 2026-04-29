@@ -1,40 +1,114 @@
 #include <math.h>
 #include <string.h>
-#include <immintrin.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "cudaSift.h"
 
-/* Portable 32-byte alignment for AVX2 */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-  #define ALIGN32 _Alignas(32)
-#elif defined(_MSC_VER)
-  #define ALIGN32 __declspec(align(32))
-#elif defined(__GNUC__)
-  #define ALIGN32 __attribute__((aligned(32)))
+/* ────────────────────────────────────────────────────────────────────────
+ * AVX2 + FMA gating
+ *
+ * Both AVX2 and FMA must be advertised by the compiler for the SIMD path
+ * to compile.  Otherwise we fall back to a portable scalar implementation.
+ *   - MSVC: `/arch:AVX2` defines `__AVX2__` and implicitly enables FMA
+ *           intrinsics, so we don't require `__FMA__` there.
+ *   - GCC/Clang: require both `__AVX2__` and `__FMA__` (i.e. `-mavx2 -mfma`).
+ * ──────────────────────────────────────────────────────────────────────── */
+#if defined(__AVX2__) && (defined(_MSC_VER) || defined(__FMA__))
+  #define CUSIFT_HAVE_AVX2 1
+  #include <immintrin.h>
+#else
+  #define CUSIFT_HAVE_AVX2 0
+#endif
+
+#if CUSIFT_HAVE_AVX2
+  /* Portable 32-byte alignment for AVX2 loads/stores */
+  #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+    #define ALIGN32 _Alignas(32)
+  #elif defined(_MSC_VER)
+    #define ALIGN32 __declspec(align(32))
+  #elif defined(__GNUC__)
+    #define ALIGN32 __attribute__((aligned(32)))
+  #else
+    #define ALIGN32
+  #endif
 #else
   #define ALIGN32
 #endif
 
-/*
- * Fast approximate 1/sqrt(x) using SSE rsqrt + one Newton-Raphson step.
- * ~23 bits of mantissa accuracy, much faster than 1.0f / sqrtf(x).
- */
-static inline float fast_rsqrtf(float x)
-{
-    __m128 vx  = _mm_set_ss(x);
-    __m128 est = _mm_rsqrt_ss(vx);
-    /* Newton-Raphson: est *= 1.5 - 0.5 * x * est^2 */
-    __m128 half_x = _mm_mul_ss(_mm_set_ss(0.5f), vx);
-    __m128 est_sq = _mm_mul_ss(est, est);
-    __m128 nr     = _mm_sub_ss(_mm_set_ss(1.5f), _mm_mul_ss(half_x, est_sq));
-    return _mm_cvtss_f32(_mm_mul_ss(est, nr));
-}
+/* ────────────────────────────────────────────────────────────────────────
+ * Runtime CPU feature detection
+ *
+ * When the binary was built with the AVX2 path, the entire translation
+ * unit may emit AVX2 instructions (the compiler is free to auto-vectorise
+ * scalar code under `/arch:AVX2` or `-mavx2`).  Running such a binary on
+ * a CPU without AVX2/FMA will fault with an illegal instruction.  This
+ * helper returns non-zero when the host CPU advertises AVX2 + FMA + the
+ * required OSXSAVE/XGETBV bits, so the caller can abort with a clear
+ * diagnostic instead of crashing.
+ * ──────────────────────────────────────────────────────────────────────── */
+#if CUSIFT_HAVE_AVX2
+  #if defined(_MSC_VER)
+    #include <intrin.h>
+    static int cusift_cpu_supports_avx2_fma(void)
+    {
+        int regs[4];
+        __cpuid(regs, 0);
+        if (regs[0] < 7) return 0;
+
+        __cpuid(regs, 1);
+        const int has_osxsave = (regs[2] >> 27) & 1;
+        const int has_fma     = (regs[2] >> 12) & 1;
+        const int has_avx     = (regs[2] >> 28) & 1;
+        if (!has_osxsave || !has_fma || !has_avx) return 0;
+
+        /* OS must have enabled XMM (bit 1) and YMM (bit 2) state saving. */
+        const unsigned long long xcr0 = _xgetbv(0);
+        if ((xcr0 & 0x6ULL) != 0x6ULL) return 0;
+
+        __cpuidex(regs, 7, 0);
+        const int has_avx2 = (regs[1] >> 5) & 1;
+        return has_avx2;
+    }
+  #elif defined(__GNUC__) || defined(__clang__)
+    static int cusift_cpu_supports_avx2_fma(void)
+    {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+    }
+  #else
+    static int cusift_cpu_supports_avx2_fma(void) { return 1; }
+  #endif
+
+  static int cusift_check_simd_or_warn(void)
+  {
+      /* Check once; cache the result. */
+      static int checked = 0;
+      static int ok      = 0;
+      if (!checked) {
+          ok      = cusift_cpu_supports_avx2_fma();
+          checked = 1;
+          if (!ok) {
+              fprintf(stderr,
+                  "cusift: this build of geomFuncs requires AVX2 + FMA, "
+                  "but the host CPU does not advertise them. "
+                  "Rebuild with -DCUSIFT_ENABLE_AVX2=OFF for a portable "
+                  "scalar fallback.\n");
+          }
+      }
+      return ok;
+  }
+#endif /* CUSIFT_HAVE_AVX2 */
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Inner kernels (AVX2 path or scalar fallback)
+ * ──────────────────────────────────────────────────────────────────────── */
+#if CUSIFT_HAVE_AVX2
 
 /*
  * Accumulate the rank-1 outer product  M += Y * Y^T * w  using AVX2 FMA.
  * M is 8x8 row-major (32-byte aligned rows), Y is 8-element (32-byte aligned).
  */
-static inline void accumulate_outer_avx2(float M[8][8],
-                                         const float *Y, float w)
+static inline void accumulate_outer(float M[8][8], const float *Y, float w)
 {
     __m256 y_vec = _mm256_load_ps(Y);
     for (int r = 0; r < 8; r++)
@@ -50,7 +124,7 @@ static inline void accumulate_outer_avx2(float M[8][8],
  * Accumulate  X += Y * scalar  using AVX2 FMA.
  * Both X and Y are 8-element, 32-byte aligned.
  */
-static inline void accumulate_vec_avx2(float *X, const float *Y, float s)
+static inline void accumulate_vec(float *X, const float *Y, float s)
 {
     __m256 x_vec = _mm256_load_ps(X);
     __m256 y_vec = _mm256_load_ps(Y);
@@ -58,6 +132,25 @@ static inline void accumulate_vec_avx2(float *X, const float *Y, float s)
     x_vec = _mm256_fmadd_ps(y_vec, s_vec, x_vec);
     _mm256_store_ps(X, x_vec);
 }
+
+#else /* !CUSIFT_HAVE_AVX2 — portable scalar fallbacks */
+
+static inline void accumulate_outer(float M[8][8], const float *Y, float w)
+{
+    for (int r = 0; r < 8; r++) {
+        const float yr_w = Y[r] * w;
+        for (int c = 0; c < 8; c++)
+            M[r][c] += Y[c] * yr_w;
+    }
+}
+
+static inline void accumulate_vec(float *X, const float *Y, float s)
+{
+    for (int i = 0; i < 8; i++)
+        X[i] += Y[i] * s;
+}
+
+#endif /* CUSIFT_HAVE_AVX2 */
 
 /*
  * Solve the 8x8 linear system M * x = b in-place using Cholesky
@@ -120,6 +213,13 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
     if (data->h_data == NULL)
         return 0;
 
+#if CUSIFT_HAVE_AVX2
+    /* Refuse to execute AVX2-compiled code on a CPU that lacks AVX2/FMA
+     * rather than letting the program die with an illegal instruction. */
+    if (!cusift_check_simd_or_warn())
+        return 0;
+#endif
+
     SiftPoint *mpts = data->h_data;
     float limit = thresh * thresh;
     int numPts = data->numPts;
@@ -135,17 +235,24 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
         ALIGN32 float X[8];
         ALIGN32 float Y[8];
 
+#if CUSIFT_HAVE_AVX2
         /* Zero M and X with AVX2 stores */
         __m256 zero = _mm256_setzero_ps();
         for (int r = 0; r < 8; r++)
             _mm256_store_ps(&M[r][0], zero);
         _mm256_store_ps(X, zero);
+#else
+        memset(M, 0, sizeof(M));
+        memset(X, 0, sizeof(X));
+#endif
 
         for (int i = 0; i < numPts; i++)
         {
+#if CUSIFT_HAVE_AVX2
             /* Prefetch next SiftPoint into L1 cache */
             if (i + 1 < numPts)
                 _mm_prefetch((const char *)&mpts[i + 1], _MM_HINT_T0);
+#endif
 
             SiftPoint *pt = &mpts[i];
             if (pt->score < minScore || pt->ambiguity > maxAmbiguity)
@@ -161,14 +268,6 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
             float dx = (A[0] * xp + A[1] * yp + A[2]) * inv_den - mx;
             float dy = (A[3] * xp + A[4] * yp + A[5]) * inv_den - my;
             float err_sq = dx * dx + dy * dy;
-
-            /* Huber weight: 1 for inliers, thresh/err for outliers */
-            //float wei = (err_sq <= limit) ? 1.0f
-            //                              : thresh * fast_rsqrtf(err_sq);
-
-            /* Tukey's biweight: (1 - (err/thresh)^2)^2 for inliers, 0 for outliers */
-            //float r = sqrtf(err_sq) / thresh;
-            //float wei = (r < 1.0f) ? powf(1.0f - r * r, 2) : 0.0f;
 
             /* Binary weight */
             float wei = (err_sq <= limit) ? 1.0f : 0.0f;
@@ -186,16 +285,16 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
             Y[3] = 0.0f; Y[4] = 0.0f; Y[5] = 0.0f;
             Y[6] = -xp * mx; Y[7] = -yp * mx;
 
-            accumulate_outer_avx2(M, Y, wei);
-            accumulate_vec_avx2(X, Y, mx * wei);
+            accumulate_outer(M, Y, wei);
+            accumulate_vec(X, Y, mx * wei);
 
             /* --- y-equation contribution --- */
             Y[0] = 0.0f; Y[1] = 0.0f; Y[2] = 0.0f;
             Y[3] = xp;  Y[4] = yp;  Y[5] = 1.0f;
             Y[6] = -xp * my; Y[7] = -yp * my;
 
-            accumulate_outer_avx2(M, Y, wei);
-            accumulate_vec_avx2(X, Y, my * wei);
+            accumulate_outer(M, Y, wei);
+            accumulate_vec(X, Y, my * wei);
         }
 
         /* Solve M * A = X via Cholesky */
