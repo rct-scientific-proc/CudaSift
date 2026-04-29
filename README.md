@@ -57,7 +57,11 @@ test/
     img1.png, img2.png       Sample image pair
 cusift_py/
     cusift/                  Python package (ctypes bindings)
+examples/
+    cuda_optimize.py         Optuna-based parameter tuning example
 CMakeLists.txt
+cmake/
+    cusiftConfig.cmake.in    Template consumed by find_package(cusift)
 ```
 
 ## Requirements
@@ -181,11 +185,14 @@ int main()
 }
 ```
 
-The build exports a `cusift` CMake target you can consume from a downstream
-project after `find_package(cusift)` or `add_subdirectory()`:
+The build exports a `cusift::cusift` CMake target you can consume from a
+downstream project after `find_package(cusift CONFIG REQUIRED)` (the install
+step writes `cusiftConfig.cmake` and a versioned `cusiftConfigVersion.cmake`)
+or via `add_subdirectory()`:
 
 ```cmake
-target_link_libraries(my_app PRIVATE cusift)
+find_package(cusift CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE cusift::cusift)
 ```
 
 ## Quick start (Python)

@@ -125,11 +125,14 @@ target_link_libraries(cusift_speed PRIVATE cusift)
 
 # ── Install ──────────────────────────────────────────────
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 install(TARGETS cusift
+  EXPORT cusiftTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 install(TARGETS cusift_demo cusift_speed
@@ -146,6 +149,37 @@ install(DIRECTORY test/
     PATTERN "*.png"
     PATTERN "*.py"
     PATTERN "*.cpp"
+)
+
+# ── Package config (find_package(cusift)) ────────────────
+set(CUSIFT_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/cusift")
+
+install(EXPORT cusiftTargets
+  FILE        cusiftTargets.cmake
+  NAMESPACE   cusift::
+  DESTINATION ${CUSIFT_INSTALL_CMAKEDIR}
+)
+
+# Generated alongside the build tree so consumers using add_subdirectory()
+# can also resolve cusift::cusift identically to the install path.
+add_library(cusift::cusift ALIAS cusift)
+
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cusiftConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/cusiftConfig.cmake"
+  INSTALL_DESTINATION ${CUSIFT_INSTALL_CMAKEDIR}
+)
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/cusiftConfigVersion.cmake"
+  VERSION       ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/cusiftConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/cusiftConfigVersion.cmake"
+  DESTINATION ${CUSIFT_INSTALL_CMAKEDIR}
 )
 
 # ── CPack ────────────────────────────────────────────────
