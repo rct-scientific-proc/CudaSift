@@ -8,7 +8,10 @@
 #define NUM_SCALES      5
 
 // Scale down thread block width
-#define SCALEDOWN_W    64 // 60 
+// Chosen so that (SCALEDOWN_W + 4) is a multiple of the warp size (32),
+// otherwise we launch with 68 threads -> 3 warps with the 3rd running
+// only 4 active lanes for the entire kernel.
+#define SCALEDOWN_W    60 // was 64; 60+4 = 64 = 2 warps
 
 // Scale down thread block height
 #define SCALEDOWN_H    16 // 8
