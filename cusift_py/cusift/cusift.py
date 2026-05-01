@@ -7,6 +7,7 @@ All public symbols are re-exported from the package ``__init__.py``.
 from __future__ import annotations
 
 import ctypes
+import weakref
 from ctypes import POINTER, byref, c_bool, c_float, c_int
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -314,18 +315,33 @@ class KeypointList(list):
         super().__init__(keypoints)
         self._sift_data = sift_data
         self._lib = lib
-        self._freed = False
+        # Use weakref.finalize instead of __del__ so cleanup is robust against
+        # reference cycles (tracebacks, REPL `_`, Optuna trial state) and runs
+        # reliably even at interpreter shutdown.
+        self._finalizer = weakref.finalize(
+            self, KeypointList._cleanup, lib, sift_data
+        )
+
+    @staticmethod
+    def _cleanup(lib: ctypes.CDLL, sift_data: SiftData) -> None:
+        # `byref` and `lib` may not be available during interpreter shutdown;
+        # swallow any exception so the finalizer never reports an error.
+        try:
+            lib.DeleteSiftData(ctypes.byref(sift_data))
+        except Exception:
+            pass
 
     # -- resource management --------------------------------------------------
 
+    @property
+    def _freed(self) -> bool:
+        return not self._finalizer.alive
+
     def free(self) -> None:
         """Release the underlying ``SiftData`` GPU/host memory."""
-        if not self._freed:
-            self._lib.DeleteSiftData(byref(self._sift_data))
-            self._freed = True
-
-    def __del__(self) -> None:
-        self.free()
+        # finalize.__call__ runs the cleanup atomically and marks it inactive;
+        # subsequent calls are no-ops.
+        self._finalizer()
 
     def __enter__(self) -> "KeypointList":
         return self
@@ -640,12 +656,15 @@ class CuSift:
             byref(warped2_ct),
             c_bool(use_gpu),
         )
-        _check_error(self._lib)
 
         # -- Copy warped pixels into numpy arrays -------------------------
         #    The C library allocates warped_image.host_img_ with malloc();
         #    we copy the data and then free the C-side buffer via FreeImage().
+        #    FreeImage() is a no-op when host_img_ is NULL, so it is safe to
+        #    call unconditionally even if the C call errored out.
         try:
+            _check_error(self._lib)
+
             n1 = warped1_ct.width_ * warped1_ct.height_
             n2 = warped2_ct.width_ * warped2_ct.height_
 
@@ -766,9 +785,13 @@ class CuSift:
 
             return kp1, kp2, matches
         except:
-            if kp1 is None:
+            if kp1 is not None:
+                kp1.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is None:
+            if kp2 is not None:
+                kp2.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data2))
             raise
 
@@ -887,9 +910,13 @@ class CuSift:
 
             return kp1, kp2, matches, H, num_matches.value
         except:
-            if kp1 is None:
+            if kp1 is not None:
+                kp1.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is None:
+            if kp2 is not None:
+                kp2.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data2))
             raise
 
@@ -1021,9 +1048,13 @@ class CuSift:
 
             return kp1, kp2, matches, H, num_matches.value
         except:
-            if kp1 is None:
+            if kp1 is not None:
+                kp1.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is None:
+            if kp2 is not None:
+                kp2.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data2))
             raise
 
@@ -1108,10 +1139,8 @@ class CuSift:
         )
         kp1 = None
         kp2 = None
-        c_call_ok = False
         try:
             _check_error(self._lib)
-            c_call_ok = True
 
             # -- Convert keypoints ----------------------------------------
             kps1: List[Keypoint] = []
@@ -1158,16 +1187,20 @@ class CuSift:
 
             return kp1, kp2, matches, H, num_matches.value, warped1, warped2
         except:
-            if kp1 is None:
+            if kp1 is not None:
+                kp1.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is None:
+            if kp2 is not None:
+                kp2.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data2))
             raise
         finally:
-            if c_call_ok:
-                # Free the C-allocated pixel buffers (data already copied)
-                self._lib.FreeImage(byref(warped1_ct))
-                self._lib.FreeImage(byref(warped2_ct))
+            # FreeImage() is a no-op when host_img_ is NULL, so it is safe to
+            # call unconditionally even if the C call errored out.
+            self._lib.FreeImage(byref(warped1_ct))
+            self._lib.FreeImage(byref(warped2_ct))
 
     def extract_and_match_and_find_homography_multi_and_warp(
         self,
@@ -1264,10 +1297,8 @@ class CuSift:
         )
         kp1 = None
         kp2 = None
-        c_call_ok = False
         try:
             _check_error(self._lib)
-            c_call_ok = True
 
             # -- Convert keypoints ----------------------------------------
             kps1: List[Keypoint] = []
@@ -1314,16 +1345,20 @@ class CuSift:
 
             return kp1, kp2, matches, H, num_matches.value, warped1, warped2
         except:
-            if kp1 is None:
+            if kp1 is not None:
+                kp1.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is None:
+            if kp2 is not None:
+                kp2.free()
+            else:
                 self._lib.DeleteSiftData(byref(sift_data2))
             raise
         finally:
-            if c_call_ok:
-                # Free the C-allocated pixel buffers (data already copied)
-                self._lib.FreeImage(byref(warped1_ct))
-                self._lib.FreeImage(byref(warped2_ct))
+            # FreeImage() is a no-op when host_img_ is NULL, so it is safe to
+            # call unconditionally even if the C call errored out.
+            self._lib.FreeImage(byref(warped1_ct))
+            self._lib.FreeImage(byref(warped2_ct))
 
     # -- Visualisation ----------------------------------------------------
 
