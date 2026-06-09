@@ -46,6 +46,15 @@ HOMOGRAPHY_GOAL_MIN_EYE_DIFF = 1
 """Minimise the Frobenius distance between the top-left 2x2 block and the identity matrix."""
 
 
+# -- Geometric model constants ------------------------------------------------
+
+MODEL_HOMOGRAPHY = 0
+"""Full 8-DOF projective homography (DLT + RANSAC from 4-point samples)."""
+
+MODEL_SIMILARITY = 1
+"""4-DOF similarity transform (rotation + uniform scale + translation)."""
+
+
 def _check_error(lib: ctypes.CDLL) -> None:
     """Query the library error flag; raise :class:`CuSiftError` if set."""
     if lib.CusiftHadError():
@@ -201,6 +210,9 @@ class HomographyOptions:
     improve_max_ambiguity: float = 0.80
     improve_thresh: float = 3.0
     seed: int = 0
+    model_type: int = MODEL_HOMOGRAPHY
+    """Geometric model to fit: :data:`MODEL_HOMOGRAPHY` (0, default) or
+    :data:`MODEL_SIMILARITY` (1)."""
 
     def _to_ctypes(self) -> FindHomographyOptions_t:
         return FindHomographyOptions_t(
@@ -213,6 +225,7 @@ class HomographyOptions:
             improve_max_ambiguity_=self.improve_max_ambiguity,
             improve_thresh_=self.improve_thresh,
             seed_=self.seed,
+            model_type_=self.model_type,
         )
 
 

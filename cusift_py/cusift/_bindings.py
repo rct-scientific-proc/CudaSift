@@ -87,6 +87,7 @@ class FindHomographyOptions_t(Structure):
         ("improve_max_ambiguity_", c_float),
         ("improve_thresh_", c_float),
         ("seed_", c_uint),
+        ("model_type_", c_int),
     ]
 
 

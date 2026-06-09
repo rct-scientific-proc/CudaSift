@@ -21,6 +21,8 @@ from cusift.cusift import (
     Keypoint,
     KeypointList,
     MatchResult,
+    MODEL_HOMOGRAPHY,
+    MODEL_SIMILARITY,
 )
 
 __all__ = [
@@ -33,4 +35,6 @@ __all__ = [
     "Keypoint",
     "KeypointList",
     "MatchResult",
+    "MODEL_HOMOGRAPHY",
+    "MODEL_SIMILARITY",
 ]

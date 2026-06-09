@@ -26,8 +26,14 @@ class SiftDataGuard
 private:
     SiftData data_;
 public:
-    SiftDataGuard() {}
+    // Zero-initialize so the destructor's FreeSiftData() is safe even if the
+    // guard is destroyed before InitSiftData() populates the buffers (e.g. an
+    // exception thrown during allocation). FreeSiftData() is NULL-safe.
+    SiftDataGuard() { data_.numPts = 0; data_.maxPts = 0; data_.h_data = nullptr; data_.d_data = nullptr; }
     ~SiftDataGuard() { FreeSiftData(&data_); }
+
+    SiftDataGuard(const SiftDataGuard&) = delete;
+    SiftDataGuard& operator=(const SiftDataGuard&) = delete;
 
     SiftData* get() { return &data_; }
     const SiftData* get() const { return &data_; }
