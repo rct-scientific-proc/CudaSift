@@ -1623,26 +1623,32 @@ class CuSift:
         output_root = Path(output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
 
+        # Source image is decoded once, lazily, on the first qualifying keypoint
+        # and then reused for every patch (cropping does not mutate it). This
+        # avoids re-decoding the whole image on every loop iteration.
+        src = None
+
         for index, kp in enumerate(keypoints):
             if kp.subsampling < min_sampling:
                 continue  # skip keypoints below the sampling threshold
             kp = keypoints[index]
             desc = kp.descriptor  # shape (128,)
 
-            # -- Load the source image ----------------------------------------
-            if isinstance(image, (str, Path)):
-                src = Image.open(image).convert("RGB")
-            elif isinstance(image, np.ndarray):
-                pixels, w, h = _resolve_image_arg(image, width, height, "image")
-                arr = np.nan_to_num(pixels, nan=0.0)
-                arr = np.clip(arr, 0, 255).astype(np.uint8)
-                if arr.ndim == 1:
-                    arr = arr.reshape(h, w)
-                src = Image.fromarray(arr, mode="L").convert("RGB")
-            else:
-                raise TypeError(
-                    f"image must be a file path or numpy array, got {type(image)}"
-                )
+            # -- Load the source image (once) ---------------------------------
+            if src is None:
+                if isinstance(image, (str, Path)):
+                    src = Image.open(image).convert("RGB")
+                elif isinstance(image, np.ndarray):
+                    pixels, w, h = _resolve_image_arg(image, width, height, "image")
+                    arr = np.nan_to_num(pixels, nan=0.0)
+                    arr = np.clip(arr, 0, 255).astype(np.uint8)
+                    if arr.ndim == 1:
+                        arr = arr.reshape(h, w)
+                    src = Image.fromarray(arr, mode="L").convert("RGB")
+                else:
+                    raise TypeError(
+                        f"image must be a file path or numpy array, got {type(image)}"
+                    )
 
             # -- Left panel: image patch centred on keypoint ------------------
             # Crop a square region around the keypoint, then resize.
