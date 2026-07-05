@@ -138,7 +138,14 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     safeCall(cudaMemcpy(ctx.d_laplaceKernel, kernel, laplaceBytes, cudaMemcpyHostToDevice));
     LowPass(lowImgGuard.get(), img, max(initBlur, 0.001f), ctx);
     ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, initBlur, thresh, lowestScale, highestScale, edgeLimit, 1.0f, memoryTmp, memorySub + (size_t)height * iAlignUp(width, 128), ctx);
-    safeCall(cudaMemcpy(&siftData->numPts, &ctx.d_pointCounter[2 * numOctaves], sizeof(int), cudaMemcpyDeviceToHost));
+    // The final cumulative keypoint total lives in slot [2*numOctaves + 1]:
+    // ComputeOrientationsCONST appends the last octave's secondary-orientation
+    // features via atomicInc on d_PointCounter[2*octave + 1], and the descriptor
+    // kernel computes descriptors up to that same slot.  Reading [2*numOctaves]
+    // instead dropped the finest octave's secondary orientations (a real
+    // undercount, since that octave usually yields the most keypoints).
+    // Safe because numOctaves is capped at 7 → index 15 < counter length 17.
+    safeCall(cudaMemcpy(&siftData->numPts, &ctx.d_pointCounter[2 * numOctaves + 1], sizeof(int), cudaMemcpyDeviceToHost));
     siftData->numPts = (siftData->numPts < siftData->maxPts ? siftData->numPts : siftData->maxPts);
 
     // Sync device before sorting and copying to host

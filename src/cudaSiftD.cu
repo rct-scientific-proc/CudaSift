@@ -374,7 +374,16 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
 #define MEMWID (MINMAX_W + 2)
     __shared__ unsigned short points[2 * MEMWID];
 
-    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0)
+    // Prime this octave's counters to the previous octave's cumulative total
+    // BEFORE any block can reach the atomicInc further down.  This must be done
+    // per-block (every block's thread 0), NOT by a single (blockIdx==0) block:
+    // block scheduling is unordered, so a gate on block (0,0) let another block
+    // atomicInc d_PointCounter[2*octave+0] while it was still at its memset-0
+    // value, handing out idx 0,1,2,... and clobbering earlier octaves' features
+    // in d_Sift.  atomicMax is monotonic, so priming after another block has
+    // already incremented is a harmless no-op — making per-block priming safe
+    // under concurrency (this mirrors ComputeOrientationsCONST's pattern).
+    if (threadIdx.x == 0)
     {
         atomicMax(&d_PointCounter[2 * octave + 0], d_PointCounter[2 * octave - 1]);
         atomicMax(&d_PointCounter[2 * octave + 1], d_PointCounter[2 * octave - 1]);
