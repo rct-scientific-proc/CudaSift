@@ -14,6 +14,11 @@ void InitCuda(int devNum);
 float *AllocSiftTempMemory(int width, int height, int numOctaves);
 void FreeSiftTempMemory(float *memoryTmp);
 void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initBlur, float thresh, float lowestScale, float highestScale, float edgeLimit, float *tempMemory);
+// Initializes a SiftData and allocates its host/device buffers.
+// The struct is treated as WRITE-ONLY: the incoming pointers are not read, so
+// a fresh/uninitialized struct is fine. It also means InitSiftData does NOT
+// free buffers a previous call allocated. To reuse a SiftData, call
+// FreeSiftData() first — otherwise the earlier host/device buffers leak.
 void InitSiftData(SiftData *data, int num, bool host, bool dev);
 void FreeSiftData(SiftData *data);
 void SuppressEmbeddedPoints(SiftData *data, float radiusScale);

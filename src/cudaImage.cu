@@ -7,6 +7,7 @@
 
 #include "cudautils.h"
 #include "cudaImage.h"
+#include "RAII_Guards.hpp"
 
 int iDivUp(int a, int b) { return (a % b != 0) ? (a / b + 1) : (a / b); }
 int iDivDown(int a, int b) { return a / b; }
@@ -188,10 +189,13 @@ void CudaImage_Normalize(CudaImage *img)
     int height = img->height;
     int pitch = img->pitch;
 
-    // Allocate device memory for min/max results
-    float *d_min = NULL, *d_max = NULL;
-    safeCall(cudaMalloc(&d_min, sizeof(float)));
-    safeCall(cudaMalloc(&d_max, sizeof(float)));
+    // Allocate device memory for min/max results.  RAII guards free these even
+    // if a kernel-launch check or memcpy below throws.
+    DevicePtrGuard<float> d_min_guard, d_max_guard;
+    safeCall(cudaMalloc((void **)&d_min_guard.getRef(), sizeof(float)));
+    safeCall(cudaMalloc((void **)&d_max_guard.getRef(), sizeof(float)));
+    float *d_min = d_min_guard.get();
+    float *d_max = d_max_guard.get();
     // Initialize: min to +FLT_MAX, max to -FLT_MAX
     float initMin = FLT_MAX;
     float initMax = -FLT_MAX;
@@ -207,8 +211,6 @@ void CudaImage_Normalize(CudaImage *img)
     float minVal, maxVal;
     safeCall(cudaMemcpy(&minVal, d_min, sizeof(float), cudaMemcpyDeviceToHost));
     safeCall(cudaMemcpy(&maxVal, d_max, sizeof(float), cudaMemcpyDeviceToHost));
-    safeCall(cudaFree(d_min));
-    safeCall(cudaFree(d_max));
 
     float diff = maxVal - minVal;
     if (diff < 1e-12f)

@@ -56,15 +56,15 @@ float *AllocSiftTempMemory(int width, int height, int numOctaves)
     int w = width;
     int h = height;
     int p = iAlignUp(w, 128);
-    int size = h * p;         // image sizes
-    int sizeTmp = nd * h * p; // laplace buffer sizes
+    size_t size = (size_t)h * p;         // image sizes
+    size_t sizeTmp = (size_t)nd * h * p; // laplace buffer sizes
     for (int i = 0; i < numOctaves; i++)
     {
         w /= 2;
         h /= 2;
         p = iAlignUp(w, 128);
-        size += h * p;
-        sizeTmp += nd * h * p;
+        size += (size_t)h * p;
+        sizeTmp += (size_t)nd * h * p;
     }
     float *memoryTmp = NULL;
     size_t pitch;
@@ -110,15 +110,15 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     int h = img->height;
     int p = iAlignUp(w, 128);
     int width = w, height = h;
-    int size = h * p;         // image sizes
-    int sizeTmp = nd * h * p; // laplace buffer sizes
+    size_t size = (size_t)h * p;         // image sizes
+    size_t sizeTmp = (size_t)nd * h * p; // laplace buffer sizes
     for (int i = 0; i < numOctaves; i++)
     {
         w /= 2;
         h /= 2;
         p = iAlignUp(w, 128);
-        size += h * p;
-        sizeTmp += nd * h * p;
+        size += (size_t)h * p;
+        sizeTmp += (size_t)nd * h * p;
     }
     float *memoryTmp = tempMemory;
     size += sizeTmp;
@@ -137,7 +137,7 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     PrepareLaplaceKernels(numOctaves, initBlur, kernel);
     safeCall(cudaMemcpy(ctx.d_laplaceKernel, kernel, laplaceBytes, cudaMemcpyHostToDevice));
     LowPass(lowImgGuard.get(), img, max(initBlur, 0.001f), ctx);
-    ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, initBlur, thresh, lowestScale, highestScale, edgeLimit, 1.0f, memoryTmp, memorySub + height * iAlignUp(width, 128), ctx);
+    ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, initBlur, thresh, lowestScale, highestScale, edgeLimit, 1.0f, memoryTmp, memorySub + (size_t)height * iAlignUp(width, 128), ctx);
     safeCall(cudaMemcpy(&siftData->numPts, &ctx.d_pointCounter[2 * numOctaves], sizeof(int), cudaMemcpyDeviceToHost));
     siftData->numPts = (siftData->numPts < siftData->maxPts ? siftData->numPts : siftData->maxPts);
 
@@ -164,7 +164,7 @@ int ExtractSiftLoop(SiftData *siftData, CudaImage *img, int numOctaves, float in
         CudaImage_Allocate(subImgGuard.get(), w / 2, h / 2, p, false, memorySub, NULL);
         ScaleDown(subImgGuard.get(), img, 0.5f, ctx);
         float totInitBlur = (float)sqrt(initBlur * initBlur + 0.5f * 0.5f) / 2.0f;
-        ExtractSiftLoop(siftData, subImgGuard.get(), numOctaves - 1, totInitBlur, thresh, lowestScale, highestScale, edgeLimit, subsampling * 2.0f, memoryTmp, memorySub + (h / 2) * p, ctx);
+        ExtractSiftLoop(siftData, subImgGuard.get(), numOctaves - 1, totInitBlur, thresh, lowestScale, highestScale, edgeLimit, subsampling * 2.0f, memoryTmp, memorySub + (size_t)(h / 2) * p, ctx);
     }
     ExtractSiftOctave(siftData, img, numOctaves, thresh, lowestScale, highestScale, edgeLimit, subsampling, memoryTmp, ctx);
     return 0;
@@ -181,7 +181,7 @@ void ExtractSiftOctave(SiftData *siftData, CudaImage *img, int octave, float thr
     for (int i = 0; i < nd - 1; i++)
     {
         CudaImage_init(&diffImg[i]);
-        CudaImage_Allocate(&diffImg[i], w, h, p, false, memoryTmp + i * p * h, NULL);
+        CudaImage_Allocate(&diffImg[i], w, h, p, false, memoryTmp + (size_t)i * p * h, NULL);
     }
 
     // Specify texture
@@ -217,6 +217,12 @@ void ExtractSiftOctave(SiftData *siftData, CudaImage *img, int octave, float thr
 }
 
 // Keep
+// NOTE: This treats *data as uninitialized (write-only) — it never reads the
+// incoming h_data/d_data pointers, because callers are permitted to pass a
+// fresh, uninitialized struct (see test/main.cpp: `SiftData sd1, sd2;`).
+// Consequently it CANNOT free pre-existing buffers here (the pointers may be
+// garbage). Reusing a populated SiftData without an intervening FreeSiftData()
+// therefore leaks — see the contract note in cudaSift.h.
 void InitSiftData(SiftData *data, int num, bool host, bool dev)
 {
     data->numPts = 0;
