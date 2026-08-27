@@ -92,7 +92,7 @@ static bool test_extract(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] ExtractSiftFromImage" << std::endl;
 
-    SiftData sift_data1, sift_data2;
+    SiftData sift_data1{}, sift_data2{};
     ExtractSiftOptions_t options = default_extract_options();
 
     ExtractSiftFromImage(&im1, &sift_data1, &options);
@@ -118,7 +118,7 @@ static bool test_match(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] MatchSiftData" << std::endl;
 
-    SiftData sift_data1, sift_data2;
+    SiftData sift_data1{}, sift_data2{};
     ExtractSiftOptions_t options = default_extract_options();
 
     ExtractSiftFromImage(&im1, &sift_data1, &options);
@@ -149,7 +149,7 @@ static bool test_find_homography(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] FindHomography" << std::endl;
 
-    SiftData sift_data1, sift_data2;
+    SiftData sift_data1{}, sift_data2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -180,7 +180,7 @@ static bool test_warp_images_cpu(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] WarpImages (CPU)" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -220,7 +220,7 @@ static bool test_warp_images_gpu(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] WarpImages (GPU)" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -260,7 +260,7 @@ static bool test_warp_images_gpu_strided(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] WarpImages_GPU" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -301,7 +301,7 @@ static bool test_save_sift_data(const Image_t& im1)
 {
     std::cout << "[TEST] SaveSiftData" << std::endl;
 
-    SiftData sd;
+    SiftData sd{};
     ExtractSiftOptions_t eo = default_extract_options();
 
     ExtractSiftFromImage(&im1, &sd, &eo);
@@ -338,7 +338,7 @@ static bool test_extract_and_match(const Image_t& im1, const Image_t& im2)
 {
     std::cout << "[TEST] ExtractAndMatchSift" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
 
     ExtractAndMatchSift(&im1, &im2, &sd1, &sd2, &eo);
@@ -366,7 +366,7 @@ static bool test_extract_match_homography(const Image_t& im1, const Image_t& im2
 {
     std::cout << "[TEST] ExtractAndMatchAndFindHomography" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -393,7 +393,7 @@ static bool test_extract_match_homography_warp(const Image_t& im1, const Image_t
 {
     std::cout << "[TEST] ExtractAndMatchAndFindHomographyAndWarp" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -431,7 +431,7 @@ static bool test_extract_match_homography_warp_gpu(const Image_t& im1, const Ima
 {
     std::cout << "[TEST] ExtractAndMatchAndFindHomographyAndWarp_GPU" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
     FindHomographyOptions_t ho = default_homography_options();
 
@@ -487,7 +487,7 @@ static bool test_find_homography_both_models(const Image_t& im1, const Image_t& 
 {
     std::cout << "[TEST] FindHomography -- compare model types" << std::endl;
 
-    SiftData sd1, sd2;
+    SiftData sd1{}, sd2{};
     ExtractSiftOptions_t eo = default_extract_options();
 
     ExtractSiftFromImage(&im1, &sd1, &eo);
@@ -560,7 +560,7 @@ static bool test_extract_match_homography_both_models(const Image_t& im1, const 
 
     for (int i = 0; i < 2; i++)
     {
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
         ho.model_type_ = models[i];
@@ -611,7 +611,7 @@ static bool test_extract_match_homography_warp_both_models(const Image_t& im1, c
 
     for (int i = 0; i < 2; i++)
     {
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
         ho.model_type_ = models[i];
@@ -663,7 +663,7 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MAX_INLIERS, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
         ho.seed_ = 0; // non-deterministic seeds across attempts
@@ -695,7 +695,7 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MIN_EYE_DIFF, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
         ho.seed_ = 0;
@@ -726,7 +726,7 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
     // Sub-test 3: single attempt should behave like the non-Multi version
     {
         std::cout << "  Single attempt (num_homography_attempts=1)" << std::endl;
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
 
@@ -768,7 +768,7 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MAX_INLIERS, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
         ho.seed_ = 0;
@@ -805,7 +805,7 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MIN_EYE_DIFF, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
         ho.seed_ = 0;
@@ -841,7 +841,7 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
 
     {
         std::cout << "  Single attempt (num_homography_attempts=1)" << std::endl;
-        SiftData sd1, sd2;
+        SiftData sd1{}, sd2{};
         ExtractSiftOptions_t eo = default_extract_options();
         FindHomographyOptions_t ho = default_homography_options();
 

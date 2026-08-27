@@ -15,6 +15,10 @@ public:
     CudaImageGuard() { CudaImage_init(&img_); }
     ~CudaImageGuard() { CudaImage_destroy(&img_); }
 
+    // Copying would double-free the image; every other guard here deletes these too.
+    CudaImageGuard(const CudaImageGuard&) = delete;
+    CudaImageGuard& operator=(const CudaImageGuard&) = delete;
+
     CudaImage* get() { return &img_; }
     const CudaImage* get() const { return &img_; }
 };
