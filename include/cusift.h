@@ -109,6 +109,9 @@ extern "C"
      * Every public API function clears the error flag on entry, so this always
      * reflects the status of the *last* call.
      *
+     * Argument validation failures (NULL pointers, out-of-range options,
+     * oversized images) are reported the same way rather than crashing.
+     *
      * @return Non-zero if an error occurred, 0 otherwise.
      */
     CUSIFT_API int CusiftHadError(void);
@@ -155,6 +158,16 @@ extern "C"
 
     /**
      * @brief Container for a set of SIFT keypoints on host and device.
+     *
+     * Ownership contract: zero-initialise the struct before its first use
+     * (`SiftData sd = {0};` in C, `SiftData sd{};` in C++).  Every function
+     * that fills a SiftData first releases any buffers it already holds, so
+     * one struct can be re-used across calls without leaking; call
+     * DeleteSiftData() when you are finished with it.  If a call fails, the
+     * struct is left empty (numPts == maxPts == 0, NULL buffers) and
+     * DeleteSiftData() remains safe.  Passing a struct that was never
+     * zero-initialised is undefined behaviour: its garbage pointers would be
+     * freed.
      */
     typedef struct
     {
@@ -252,7 +265,9 @@ extern "C"
      *       on both host and device.  If the detector finds more
      *       candidates than this limit, the excess are silently
      *       dropped.  Set this high enough for your application to
-     *       avoid losing valid features.
+     *       avoid losing valid features.  Must be in
+     *       [1, INT_MAX / sizeof(SiftPoint)] (about 3.7 million);
+     *       other values are rejected with an error.
      *
      * -- Post-extraction filtering ----------------------------------------
      *
@@ -308,7 +323,7 @@ extern "C"
 
     typedef struct
     {
-        int num_loops_;                 /**< Number of RANSAC iterations. */
+        int num_loops_;                 /**< Number of RANSAC iterations, in [1, 1048560]. */
         float min_score_;               /**< Minimum match score to consider a correspondence. */
         float max_ambiguity_;           /**< Maximum ambiguity for a correspondence to be considered. */
         float thresh_;                  /**< Inlier distance threshold for RANSAC. */
@@ -333,7 +348,7 @@ extern "C"
      * @brief Extract SIFT features from an image. The caller is responsible for freeing the SiftData using DeleteSiftData() when done.
      *
      * @param image Pointer to the input image.
-     * @param sift_data Pointer to the SiftData structure where the extracted features will be stored.
+     * @param sift_data Pointer to the SiftData structure where the extracted features will be stored. Must follow the SiftData ownership contract (zero-initialised before first use); any buffers it already holds from a previous call are released first.
      * @param options Pointer to the ExtractSiftOptions_t structure containing extraction parameters.
      */
     CUSIFT_API void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options);

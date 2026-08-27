@@ -14,6 +14,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cfloat>
+#include <climits>
 #include <string>
 #include <random>
 #include <omp.h>
@@ -26,6 +27,62 @@ static void cusift_throw_error(const char *file, int line, const char *msg)
 }
 
 static int p_iAlignUp(int a, int b) { return (a % b != 0) ? (a - a % b + b) : a; }
+
+// ── Argument validation ─────────────────────────────────
+// Every public entry point validates its arguments before touching the GPU so
+// that a bad call is reported through CusiftHadError() instead of crashing or
+// silently corrupting memory.
+
+static void RequireNonNull(const void *p, const char *what)
+{
+    if (!p)
+        throw CusiftError(__FILE__, __LINE__, std::string("Required argument is NULL: ") + what);
+}
+
+// Largest max_keypoints_ whose byte count fits a 32-bit int; InitSiftData
+// checks this too, but failing here is cheaper and gives a clearer message.
+static const int kMaxKeypointsLimit = (int)(INT_MAX / sizeof(SiftPoint));
+// TestHomographies / TestSimilarities put one 16-hypothesis block per grid.y.
+static const int kMaxRansacLoops = 65535 * 16;
+
+static void ValidateImage(const Image_t *img, const char *what)
+{
+    RequireNonNull(img, what);
+    if (!img->host_img_)
+        throw CusiftError(__FILE__, __LINE__, std::string(what) + ": host_img_ is NULL");
+    if (img->width_ <= 0 || img->height_ <= 0)
+        throw CusiftError(__FILE__, __LINE__, std::string(what) + ": width and height must be positive");
+    // Row offsets inside the kernels are 32-bit; one pitched plane must fit.
+    if ((size_t)p_iAlignUp(img->width_, 128) * (size_t)img->height_ > (size_t)INT_MAX)
+        throw CusiftError(__FILE__, __LINE__, std::string(what) + ": image too large (pitch * height must fit in a 32-bit int)");
+}
+
+static void ValidateExtractOptions(const ExtractSiftOptions_t *o)
+{
+    RequireNonNull(o, "extract options");
+    if (o->max_keypoints_ <= 0 || o->max_keypoints_ > kMaxKeypointsLimit)
+        throw CusiftError(__FILE__, __LINE__, "max_keypoints_ must be in [1, " + std::to_string(kMaxKeypointsLimit) + "]");
+}
+
+static void ValidateHomographyOptions(const FindHomographyOptions_t *o)
+{
+    RequireNonNull(o, "homography options");
+    if (o->num_loops_ <= 0 || o->num_loops_ > kMaxRansacLoops)
+        throw CusiftError(__FILE__, __LINE__, "num_loops_ must be in [1, " + std::to_string(kMaxRansacLoops) + "]");
+    if (o->improve_num_loops_ < 0)
+        throw CusiftError(__FILE__, __LINE__, "improve_num_loops_ must be >= 0");
+}
+
+// Output SiftData contract (see cusift.h): the caller zero-initialises the
+// struct once; after that it may hold buffers from a previous call, which are
+// released here so re-using one SiftData across frames does not leak.  Leaves
+// the struct empty (numPts = maxPts = 0, NULL buffers) so DeleteSiftData is
+// safe even if this call fails before InitSiftData runs.
+static void PrepareSiftData(SiftData *sd, const char *what)
+{
+    RequireNonNull(sd, what);
+    FreeSiftData(sd);
+}
 
 // Dispatch to either full homography or similarity RANSAC based on model_type_
 static void FindGeometricModel(SiftData *data, float *homography, int *numMatches,
@@ -161,6 +218,10 @@ void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const Extra
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image, "image");
+        ValidateExtractOptions(options);
+        PrepareSiftData(sift_data, "sift_data");
+
         CudaImageGuard cuda_image;
 
         InitSiftData(sift_data, options->max_keypoints_, true, true);
@@ -206,6 +267,8 @@ void MatchSiftData(SiftData *data1, SiftData *data2)
 {
     cusift_api_guard([&]()
     {
+        RequireNonNull(data1, "data1");
+        RequireNonNull(data2, "data2");
         MatchSiftData_private(data1, data2);
     });
 }
@@ -214,6 +277,11 @@ void FindHomography(SiftData *data, float *homography, int *num_matches, const F
 {
     cusift_api_guard([&]()
     {
+        RequireNonNull(data, "data");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(num_matches, "num_matches");
+        ValidateHomographyOptions(options);
+
         FindGeometricModel(
             data,
             homography,
@@ -277,6 +345,7 @@ void SaveSiftData(const char *filename, const SiftData *sift_data)
 {
     cusift_api_guard([&]()
     {
+        RequireNonNull(filename, "filename");
         if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
             ERROR("SaveSiftData: no data to save");
 
@@ -325,6 +394,12 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        ValidateExtractOptions(extract_options);
+        PrepareSiftData(sift_data1, "sift_data1");
+        PrepareSiftData(sift_data2, "sift_data2");
+
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -377,6 +452,15 @@ void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *imag
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        ValidateExtractOptions(extract_options);
+        PrepareSiftData(sift_data1, "sift_data1");
+        PrepareSiftData(sift_data2, "sift_data2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(num_matches, "num_matches");
+        ValidateHomographyOptions(homography_options);
+
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -460,6 +544,15 @@ void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        ValidateExtractOptions(extract_options);
+        PrepareSiftData(sift_data1, "sift_data1");
+        PrepareSiftData(sift_data2, "sift_data2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(num_matches, "num_matches");
+        ValidateHomographyOptions(homography_options);
+
         int maxW = std::max(image1->width_, image2->width_);
         int maxH = std::max(image1->height_, image2->height_);
 
@@ -700,6 +793,12 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(warped_image1, "warped_image1");
+        RequireNonNull(warped_image2, "warped_image2");
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
 
@@ -864,6 +963,12 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(warped_image1, "warped_image1");
+        RequireNonNull(warped_image2, "warped_image2");
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
 
@@ -982,6 +1087,17 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        ValidateExtractOptions(extract_options);
+        PrepareSiftData(sift_data1, "sift_data1");
+        PrepareSiftData(sift_data2, "sift_data2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(num_matches, "num_matches");
+        ValidateHomographyOptions(homography_options);
+        RequireNonNull(warped_image1, "warped_image1");
+        RequireNonNull(warped_image2, "warped_image2");
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
         int maxW = std::max(w1, w2);
@@ -1165,6 +1281,17 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        ValidateExtractOptions(extract_options);
+        PrepareSiftData(sift_data1, "sift_data1");
+        PrepareSiftData(sift_data2, "sift_data2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(num_matches, "num_matches");
+        ValidateHomographyOptions(homography_options);
+        RequireNonNull(warped_image1, "warped_image1");
+        RequireNonNull(warped_image2, "warped_image2");
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
         int maxW = std::max(w1, w2);
@@ -1335,6 +1462,17 @@ void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const
 {
     cusift_api_guard([&]()
     {
+        ValidateImage(image1, "image1");
+        ValidateImage(image2, "image2");
+        ValidateExtractOptions(extract_options);
+        PrepareSiftData(sift_data1, "sift_data1");
+        PrepareSiftData(sift_data2, "sift_data2");
+        RequireNonNull(homography, "homography");
+        RequireNonNull(num_matches, "num_matches");
+        ValidateHomographyOptions(homography_options);
+        RequireNonNull(warped_image1, "warped_image1");
+        RequireNonNull(warped_image2, "warped_image2");
+
         int w1 = image1->width_, h1 = image1->height_;
         int w2 = image2->width_, h2 = image2->height_;
         int maxW = std::max(w1, w2);
@@ -1612,14 +1750,19 @@ static int clampOctaves(int requested, int width, int height)
 
 size_t EstimateVramExtractSift(int image_width, int image_height, const ExtractSiftOptions_t *options)
 {
+    if (!options)
+        return 0;
     int octaves = clampOctaves(options->num_octaves_, image_width, image_height);
 
     size_t siftBytes    = estimateSiftDataDeviceBytes(options->max_keypoints_);
+    // thrust::sort in ExtractSift allocates temporary storage of roughly one
+    // extra copy of the keypoint array while it runs.
+    size_t sortTmpBytes = siftBytes;
     size_t imageBytes   = estimateCudaImageBytes(image_width, image_height);
     size_t pyramidBytes = estimatePyramidBytes(image_width, image_height, octaves);
     size_t contextBytes = estimateContextBytes();
 
-    return siftBytes + imageBytes + pyramidBytes + contextBytes;
+    return siftBytes + sortTmpBytes + imageBytes + pyramidBytes + contextBytes;
 }
 
 size_t EstimateVramMatchSift(int max_keypoints1, int max_keypoints2)
@@ -1630,6 +1773,8 @@ size_t EstimateVramMatchSift(int max_keypoints1, int max_keypoints2)
 
 size_t EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions_t *options)
 {
+    if (!options)
+        return 0;
     // Existing SiftData that must be resident
     size_t siftBytes = estimateSiftDataDeviceBytes(max_keypoints);
 
@@ -1671,6 +1816,8 @@ size_t EstimateVramFullPipeline(int image_width1, int image_height1,
                                 const ExtractSiftOptions_t *extract_options,
                                 const FindHomographyOptions_t *homography_options)
 {
+    if (!extract_options || !homography_options)
+        return 0;
     // SiftData for both images persists across all stages
     size_t siftBoth = estimateSiftDataDeviceBytes(extract_options->max_keypoints_) * 2;
 
@@ -1680,6 +1827,7 @@ size_t EstimateVramFullPipeline(int image_width1, int image_height1,
     int octaves = clampOctaves(extract_options->num_octaves_, maxW, maxH);
 
     size_t extractPeak = siftBoth
+                       + estimateSiftDataDeviceBytes(extract_options->max_keypoints_) // thrust::sort temporaries
                        + estimateCudaImageBytes(maxW, maxH)
                        + estimatePyramidBytes(maxW, maxH, octaves)
                        + estimateContextBytes();
