@@ -24,6 +24,11 @@ from cusift._bindings import (
     load_library,
 )
 
+# Limits mirrored from the C library.  The C side rejects these too, but a
+# Python ValueError is friendlier than a CuSiftError from inside the call.
+_MAX_KEYPOINTS_LIMIT = (2**31 - 1) // ctypes.sizeof(SiftPoint)
+_MAX_RANSAC_LOOPS = 65535 * 16
+
 
 # -- Exceptions ---------------------------------------------------------------
 
@@ -182,6 +187,10 @@ class ExtractOptions:
     are removed. 6.0 is a good starting value."""
 
     def _to_ctypes(self) -> ExtractSiftOptions_t:
+        if not (1 <= int(self.max_keypoints) <= _MAX_KEYPOINTS_LIMIT):
+            raise ValueError(
+                f"max_keypoints must be in [1, {_MAX_KEYPOINTS_LIMIT}], got {self.max_keypoints}"
+            )
         return ExtractSiftOptions_t(
             thresh_=self.thresh,
             lowest_scale_=self.lowest_scale,
@@ -215,6 +224,12 @@ class HomographyOptions:
     :data:`MODEL_SIMILARITY` (1)."""
 
     def _to_ctypes(self) -> FindHomographyOptions_t:
+        if not (1 <= int(self.num_loops) <= _MAX_RANSAC_LOOPS):
+            raise ValueError(
+                f"num_loops must be in [1, {_MAX_RANSAC_LOOPS}], got {self.num_loops}"
+            )
+        if int(self.improve_num_loops) < 0:
+            raise ValueError(f"improve_num_loops must be >= 0, got {self.improve_num_loops}")
         return FindHomographyOptions_t(
             num_loops_=self.num_loops,
             min_score_=self.min_score,
@@ -304,6 +319,17 @@ def _resolve_image_arg(
         w = width
     if height is not None:
         h = height
+
+    # The C library reads exactly width*height floats from the buffer, so a
+    # mismatch here would be an out-of-bounds read of the numpy allocation.
+    w, h = int(w), int(h)
+    if w <= 0 or h <= 0:
+        raise ValueError(f"{label}: width and height must be positive, got {w}x{h}")
+    if w * h != pixels.size:
+        raise ValueError(
+            f"{label}: width*height ({w}*{h}={w * h}) does not match the "
+            f"number of pixels in the array ({pixels.size})"
+        )
 
     return pixels, w, h
 
@@ -654,7 +680,11 @@ class CuSift:
         img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
         img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
 
-        H_flat = np.ascontiguousarray(homography.ravel(), dtype=np.float32)
+        H_flat = np.ascontiguousarray(np.asarray(homography, dtype=np.float32).ravel())
+        if H_flat.size != 9:
+            raise ValueError(
+                f"homography must have 9 elements (3x3), got shape {np.shape(homography)}"
+            )
         h_ct = H_flat.ctypes.data_as(POINTER(c_float))
 
         warped1_ct = Image_t()
