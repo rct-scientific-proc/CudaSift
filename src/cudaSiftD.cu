@@ -46,7 +46,14 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
         y = (y < 0 ? 0 : y);
         y = (y >= height ? height - 1 : y);
         yRead[tx] = y * pitch;
-        yWrite[tx] = (yStart + tx - 4) / 2 * newpitch;
+        // The result image has height/2 rows (ExtractSiftLoop allocates it as
+        // h/2), but the last block in y still walks all 8 of its output rows.
+        // Without this clamp a source height that is not a multiple of
+        // SCALEDOWN_H wrote past the end of the sub-image and, for the last
+        // octave, past the end of the pyramid allocation.  -1 marks a row that
+        // must not be stored; every d_Result store below checks for it.
+        int yw = (yStart + tx - 4) / 2;
+        yWrite[tx] = (yw >= 0 && yw < height / 2) ? yw * newpitch : -1;
     }
     __syncthreads();
     int xRead = xStart + tx - 2;
@@ -62,7 +69,7 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
             if (tx < maxtx)
             {
                 brow[tx4] = k0 * (inrow[2 * tx] + inrow[2 * tx + 4]) + k1 * (inrow[2 * tx + 1] + inrow[2 * tx + 3]) + k2 * inrow[2 * tx + 2];
-                if (dy >= 4 && !(dy & 1))
+                if (dy >= 4 && !(dy & 1) && yWrite[dy + 0] >= 0)
                     d_Result[yWrite[dy + 0] + xWrite] = k2 * brow[tx2] + k0 * (brow[tx0] + brow[tx4]) + k1 * (brow[tx1] + brow[tx3]);
             }
             __syncthreads();
@@ -74,7 +81,7 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
             if (tx < maxtx)
             {
                 brow[tx0] = k0 * (inrow[2 * tx] + inrow[2 * tx + 4]) + k1 * (inrow[2 * tx + 1] + inrow[2 * tx + 3]) + k2 * inrow[2 * tx + 2];
-                if (dy >= 3 && (dy & 1))
+                if (dy >= 3 && (dy & 1) && yWrite[dy + 1] >= 0)
                     d_Result[yWrite[dy + 1] + xWrite] = k2 * brow[tx3] + k0 * (brow[tx1] + brow[tx0]) + k1 * (brow[tx2] + brow[tx4]);
             }
             __syncthreads();
@@ -86,7 +93,7 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
             if (tx < maxtx)
             {
                 brow[tx1] = k0 * (inrow[2 * tx] + inrow[2 * tx + 4]) + k1 * (inrow[2 * tx + 1] + inrow[2 * tx + 3]) + k2 * inrow[2 * tx + 2];
-                if (dy >= 2 && !(dy & 1))
+                if (dy >= 2 && !(dy & 1) && yWrite[dy + 2] >= 0)
                     d_Result[yWrite[dy + 2] + xWrite] = k2 * brow[tx4] + k0 * (brow[tx2] + brow[tx1]) + k1 * (brow[tx3] + brow[tx0]);
             }
             __syncthreads();
@@ -98,7 +105,7 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
             if (tx < maxtx)
             {
                 brow[tx2] = k0 * (inrow[2 * tx] + inrow[2 * tx + 4]) + k1 * (inrow[2 * tx + 1] + inrow[2 * tx + 3]) + k2 * inrow[2 * tx + 2];
-                if (dy >= 1 && (dy & 1))
+                if (dy >= 1 && (dy & 1) && yWrite[dy + 3] >= 0)
                     d_Result[yWrite[dy + 3] + xWrite] = k2 * brow[tx0] + k0 * (brow[tx3] + brow[tx2]) + k1 * (brow[tx4] + brow[tx1]);
             }
             __syncthreads();
@@ -110,7 +117,7 @@ __global__ void ScaleDown(float *d_Result, float *d_Data, int width, int pitch, 
             if (tx < dx2 && xWrite < width / 2)
             {
                 brow[tx3] = k0 * (inrow[2 * tx] + inrow[2 * tx + 4]) + k1 * (inrow[2 * tx + 1] + inrow[2 * tx + 3]) + k2 * inrow[2 * tx + 2];
-                if (!(dy & 1))
+                if (!(dy & 1) && yWrite[dy + 4] >= 0)
                     d_Result[yWrite[dy + 4] + xWrite] = k2 * brow[tx1] + k0 * (brow[tx4] + brow[tx3]) + k1 * (brow[tx0] + brow[tx2]);
             }
             __syncthreads();
@@ -357,6 +364,12 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
                     d_Sift[idx].orientation = 11.25f * (peak < 0.0f ? peak + 32.0f : peak);
                     ;
                     d_Sift[idx].subsampling = d_Sift[bx].subsampling;
+                    d_Sift[idx].score = 0.0f;
+                    d_Sift[idx].ambiguity = 0.0f;
+                    d_Sift[idx].match = -1;
+                    d_Sift[idx].match_xpos = 0.0f;
+                    d_Sift[idx].match_ypos = 0.0f;
+                    d_Sift[idx].match_error = 0.0f;
                 }
             }
         }
@@ -394,15 +407,18 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
     int minx = block * MINMAX_W;
     int maxx = min(minx + MINMAX_W, width);
     int xpos = minx + tx;
-    int size = pitch * height;
-    int ptr = size * scale + max(min(xpos - 1, width - 1), 0);
+    // Plane and row offsets in size_t: computed in a 32-bit int, pitch*height*7
+    // wrapped negative for images above ~17.5k x 17.5k and read/wrote outside
+    // the pyramid.
+    const size_t size = (size_t)pitch * (size_t)height;
+    const size_t ptr = size * (size_t)scale + (size_t)max(min(xpos - 1, width - 1), 0);
 
     int yloops = min(height - MINMAX_H * blockIdx.y, MINMAX_H);
     float maxv = 0.0f;
     for (int y = 0; y < yloops; y++)
     {
         int ypos = MINMAX_H * blockIdx.y + y;
-        int yptr1 = ptr + ypos * pitch;
+        size_t yptr1 = ptr + (size_t)ypos * pitch;
         float val = d_Data0[yptr1 + 1 * size];
         maxv = fmaxf(maxv, fabs(val));
     }
@@ -416,13 +432,13 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
     {
 
         int ypos = MINMAX_H * blockIdx.y + y;
-        int yptr1 = ptr + ypos * pitch;
+        size_t yptr1 = ptr + (size_t)ypos * pitch;
         float d11 = d_Data0[yptr1 + 1 * size];
         if (__any_sync(0xffffffff, fabs(d11) > thresh))
         {
 
-            int yptr0 = ptr + max(0, ypos - 1) * pitch;
-            int yptr2 = ptr + min(height - 1, ypos + 1) * pitch;
+            size_t yptr0 = ptr + (size_t)max(0, ypos - 1) * pitch;
+            size_t yptr2 = ptr + (size_t)min(height - 1, ypos + 1) * pitch;
             float d01 = d_Data0[yptr1];
             float d10 = d_Data0[yptr0 + 1 * size];
             float d12 = d_Data0[yptr2 + 1 * size];
@@ -484,7 +500,7 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
         // boundaries through the pitch padding.
         if (xpos < 1 || xpos >= width - 1 || ypos < 1 || ypos >= height - 1)
             return;
-        int ptr = xpos + (ypos + (scale + 1) * height) * pitch;
+        const size_t ptr = (size_t)xpos + ((size_t)ypos + (size_t)(scale + 1) * height) * (size_t)pitch;
         float val = d_Data0[ptr];
         float *data1 = &d_Data0[ptr];
         float dxx = 2.0f * val - data1[-1] - data1[1];
@@ -497,8 +513,8 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
             float edge = __fdividef(tra * tra, det);
             float dx = 0.5f * (data1[1] - data1[-1]);
             float dy = 0.5f * (data1[pitch] - data1[-pitch]);
-            float *data0 = d_Data0 + ptr - height * pitch;
-            float *data2 = d_Data0 + ptr + height * pitch;
+            float *data0 = d_Data0 + ptr - (size_t)height * pitch;
+            float *data2 = d_Data0 + ptr + (size_t)height * pitch;
             float ds = 0.5f * (data0[0] - data2[0]);
             float dss = 2.0f * val - data2[0] - data0[0];
             float dxs = 0.25f * (data2[1] + data0[-1] - data0[1] - data2[-1]);
@@ -541,6 +557,15 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
                     d_Sift[idx].sharpness = val + dval;
                     d_Sift[idx].edgeness = edge;
                     d_Sift[idx].subsampling = subsampling;
+                    // The match fields are only produced by MatchSiftData;
+                    // define them here so an unmatched SiftData never exports
+                    // whatever the device allocator handed back.
+                    d_Sift[idx].score = 0.0f;
+                    d_Sift[idx].ambiguity = 0.0f;
+                    d_Sift[idx].match = -1;
+                    d_Sift[idx].match_xpos = 0.0f;
+                    d_Sift[idx].match_ypos = 0.0f;
+                    d_Sift[idx].match_error = 0.0f;
                 }
             }
         }
@@ -580,7 +605,7 @@ __global__ void LaplaceMultiMem(float *d_Image, float *d_Result, int width, int 
     if (xp < (width + 2 * LAPLACE_R))
     {
         for (int i = 0; i <= 2 * LAPLACE_R; i++)
-            temp[i] = data[max(0, min(yp + i - LAPLACE_R, height - 1)) * pitch];
+            temp[i] = data[(size_t)max(0, min(yp + i - LAPLACE_R, height - 1)) * pitch];
         for (int scale = 0; scale < LAPLACE_S; scale++)
         {
             float *buf = buff + (LAPLACE_W + 2 * LAPLACE_R) * scale;
@@ -606,14 +631,17 @@ __global__ void LaplaceMultiMem(float *d_Image, float *d_Result, int width, int 
 #pragma unroll
             for (int j = 1; j <= LAPLACE_R; j++)
                 res += kern[scale][j] * (buf[tx + LAPLACE_R - j] + buf[tx + LAPLACE_R + j]);
-            d_Result[(scale - 1) * height * pitch + yp * pitch + xp] = res - oldRes;
+            d_Result[(size_t)(scale - 1) * height * pitch + (size_t)yp * pitch + xp] = res - oldRes;
             oldRes = res;
         }
     }
 }
 
 // Keep
-__global__ void LowPassBlock(float *d_Image, float *d_Result, int width, int pitch, int height, const float *__restrict__ d_LowPassKernel)
+// srcPitch is the pitch of d_Image and pitch that of d_Result: the caller's
+// image comes from cudaMallocPitch and is not guaranteed to share the
+// result's iAlignUp(width, 128) pitch.
+__global__ void LowPassBlock(float *d_Image, float *d_Result, int width, int srcPitch, int pitch, int height, const float *__restrict__ d_LowPassKernel)
 {
     __shared__ float xrows[16][32];
     const int tx = threadIdx.x;
@@ -628,7 +656,7 @@ __global__ void LowPassBlock(float *d_Image, float *d_Result, int width, int pit
     {
         int ly = l + ty;
         int yl = max(min(yp + l + 4, height - 1), 0);
-        float val = d_Image[yl * pitch + xl];
+        float val = d_Image[(size_t)yl * srcPitch + xl];
         val = k[4] * ShiftDown(val, 4) +
               k[3] * (ShiftDown(val, 5) + ShiftDown(val, 3)) +
               k[2] * (ShiftDown(val, 6) + ShiftDown(val, 2)) +
@@ -642,7 +670,7 @@ __global__ void LowPassBlock(float *d_Image, float *d_Result, int width, int pit
     {
         int ly = l + ty;
         int yl = min(yp + l + 4, height - 1);
-        float val = d_Image[yl * pitch + xl];
+        float val = d_Image[(size_t)yl * srcPitch + xl];
         val = k[4] * ShiftDown(val, 4) +
               k[3] * (ShiftDown(val, 5) + ShiftDown(val, 3)) +
               k[2] * (ShiftDown(val, 6) + ShiftDown(val, 2)) +

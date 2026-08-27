@@ -326,7 +326,7 @@ double LowPass(CudaImage *res, CudaImage *src, float scale, SiftDeviceContext &c
     int height = res->height;
     dim3 blocks(iDivUp(width, LOWPASS_W), iDivUp(height, LOWPASS_H));
     dim3 threads(LOWPASS_W + 2 * LOWPASS_R, 4);
-    LowPassBlock<<<blocks, threads>>>(src->d_data, res->d_data, width, pitch, height, ctx.d_lowPassKernel);
+    LowPassBlock<<<blocks, threads>>>(src->d_data, res->d_data, width, src->pitch, pitch, height, ctx.d_lowPassKernel);
     checkMsg("LowPass() execution failed\n");
     return 0.0;
 }
