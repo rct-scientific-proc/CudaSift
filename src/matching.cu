@@ -3,7 +3,26 @@
 #include "RAII_Guards.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <random>
+
+// malloc results used to be written through unchecked; on a no-swap board an
+// allocation failure was a segfault instead of a reported error.
+static void *CheckedMalloc(size_t bytes)
+{
+    void *p = malloc(bytes ? bytes : 1);
+    if (!p)
+        throw CusiftError(__FILE__, __LINE__, "host allocation of " + std::to_string(bytes) + " bytes failed");
+    return p;
+}
+
+// TestHomographies / TestSimilarities put one 16-hypothesis block per grid.y
+// entry, and the 4*sizeof(int)*numLoops byte count used to be an int.
+static void ValidateRansacLoops(int numLoops)
+{
+    if (numLoops <= 0 || numLoops > 65535 * 16)
+        throw CusiftError(__FILE__, __LINE__, "RANSAC num_loops must be in [1, 1048560]");
+}
 
 //================= Device matching functions =====================//
 
@@ -401,32 +420,38 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     if (data->d_data == NULL)
         return 0.0f;
     SiftPoint *d_sift = data->d_data;
+    ValidateRansacLoops(numLoops);
     numLoops = iDivUp(numLoops, 16) * 16;
     int numPts = data->numPts;
     if (numPts < 8)
         return 0.0f;
     int numPtsUp = iDivUp(numPts, 16) * 16;
-    int randSize = 4 * sizeof(int) * numLoops;
+    const size_t randSize = 4 * sizeof(int) * (size_t)numLoops;
     int szFl = sizeof(float);
     int szPt = sizeof(SiftPoint);
     DevicePtrGuard<float> d_coord_guard;
     DevicePtrGuard<int>   d_randPts_guard;
     DevicePtrGuard<float> d_homo_guard;
     safeCall(cudaMalloc((void **)&d_coord_guard.getRef(), 4 * sizeof(float) * numPtsUp));
+    // The test kernels are launched with numPtsUp, so the up-to-15 padding
+    // entries per plane get scored too.  Fill them with NaN (0xFF bytes) so
+    // every inlier comparison on them is false, instead of counting whatever
+    // cudaMalloc handed back.
+    safeCall(cudaMemset(d_coord_guard.get(), 0xFF, 4 * sizeof(float) * numPtsUp));
     safeCall(cudaMalloc((void **)&d_randPts_guard.getRef(), randSize));
     safeCall(cudaMalloc((void **)&d_homo_guard.getRef(), 8 * sizeof(float) * numLoops));
     float *d_coord = d_coord_guard.get();
     int   *d_randPts = d_randPts_guard.get();
     float *d_homo = d_homo_guard.get();
-    HostPtrGuard<int>   h_randPts_guard((int *)malloc(randSize));
-    HostPtrGuard<float> h_scores_guard((float *)malloc(sizeof(float) * numPtsUp));
-    HostPtrGuard<float> h_ambiguities_guard((float *)malloc(sizeof(float) * numPtsUp));
+    HostPtrGuard<int>   h_randPts_guard((int *)CheckedMalloc(randSize));
+    HostPtrGuard<float> h_scores_guard((float *)CheckedMalloc(sizeof(float) * numPtsUp));
+    HostPtrGuard<float> h_ambiguities_guard((float *)CheckedMalloc(sizeof(float) * numPtsUp));
     int *h_randPts = h_randPts_guard.get();
     float *h_scores = h_scores_guard.get();
     float *h_ambiguities = h_ambiguities_guard.get();
     safeCall(cudaMemcpy2D(h_scores, szFl, &d_sift[0].score, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
     safeCall(cudaMemcpy2D(h_ambiguities, szFl, &d_sift[0].ambiguity, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
-    HostPtrGuard<int> validPts_guard((int *)malloc(sizeof(int) * numPts));
+    HostPtrGuard<int> validPts_guard((int *)CheckedMalloc(sizeof(int) * numPts));
     int *validPts = validPts_guard.get();
     int numValid = 0;
     for (int i = 0; i < numPts; i++)
@@ -598,12 +623,13 @@ double FindSimilarity_private(SiftData *data, float *homography, int *numMatches
     if (data->d_data == NULL)
         return 0.0f;
     SiftPoint *d_sift = data->d_data;
+    ValidateRansacLoops(numLoops);
     numLoops = iDivUp(numLoops, 16) * 16;
     int numPts = data->numPts;
     if (numPts < 4)
         return 0.0f;
     int numPtsUp = iDivUp(numPts, 16) * 16;
-    int randSize = 2 * sizeof(int) * numLoops; // 2 points per sample
+    const size_t randSize = 2 * sizeof(int) * (size_t)numLoops; // 2 points per sample
     int szFl = sizeof(float);
     int szPt = sizeof(SiftPoint);
 
@@ -611,15 +637,20 @@ double FindSimilarity_private(SiftData *data, float *homography, int *numMatches
     DevicePtrGuard<int>   d_randPts_guard;
     DevicePtrGuard<float> d_sims_guard;
     safeCall(cudaMalloc((void **)&d_coord_guard.getRef(), 4 * sizeof(float) * numPtsUp));
+    // The test kernels are launched with numPtsUp, so the up-to-15 padding
+    // entries per plane get scored too.  Fill them with NaN (0xFF bytes) so
+    // every inlier comparison on them is false, instead of counting whatever
+    // cudaMalloc handed back.
+    safeCall(cudaMemset(d_coord_guard.get(), 0xFF, 4 * sizeof(float) * numPtsUp));
     safeCall(cudaMalloc((void **)&d_randPts_guard.getRef(), randSize));
     safeCall(cudaMalloc((void **)&d_sims_guard.getRef(), 4 * sizeof(float) * numLoops)); // [a,b,tx,ty] per hypothesis
     float *d_coord = d_coord_guard.get();
     int   *d_randPts = d_randPts_guard.get();
     float *d_sims = d_sims_guard.get();
 
-    HostPtrGuard<int>   h_randPts_guard((int *)malloc(randSize));
-    HostPtrGuard<float> h_scores_guard((float *)malloc(sizeof(float) * numPtsUp));
-    HostPtrGuard<float> h_ambiguities_guard((float *)malloc(sizeof(float) * numPtsUp));
+    HostPtrGuard<int>   h_randPts_guard((int *)CheckedMalloc(randSize));
+    HostPtrGuard<float> h_scores_guard((float *)CheckedMalloc(sizeof(float) * numPtsUp));
+    HostPtrGuard<float> h_ambiguities_guard((float *)CheckedMalloc(sizeof(float) * numPtsUp));
     int *h_randPts = h_randPts_guard.get();
     float *h_scores = h_scores_guard.get();
     float *h_ambiguities = h_ambiguities_guard.get();
@@ -627,7 +658,7 @@ double FindSimilarity_private(SiftData *data, float *homography, int *numMatches
     safeCall(cudaMemcpy2D(h_scores, szFl, &d_sift[0].score, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
     safeCall(cudaMemcpy2D(h_ambiguities, szFl, &d_sift[0].ambiguity, szPt, szFl, numPts, cudaMemcpyDeviceToHost));
 
-    HostPtrGuard<int> validPts_guard((int *)malloc(sizeof(int) * numPts));
+    HostPtrGuard<int> validPts_guard((int *)CheckedMalloc(sizeof(int) * numPts));
     int *validPts = validPts_guard.get();
     int numValid = 0;
     for (int i = 0; i < numPts; i++)
