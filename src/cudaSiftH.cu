@@ -457,12 +457,15 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
     });
 
     // --- Spatial grid for fast neighbour lookup -------------------------
-    // Cell size = radius of the largest keypoint so that we only need to
-    // check a 3×3 neighbourhood of cells.
+    // Cell size = radius of the largest keypoint so that a 3x3 neighbourhood
+    // of cells covers every suppression radius.  Everything is computed in
+    // double and clamped on both sides before any float->int cast.
+    if (!(radiusScale > 0.0f))
+        return;
     float maxScale = pts[order[0]].scale;
-    float cellSize = radiusScale * maxScale;
-    if (cellSize < 1e-6f)
-        return;  // degenerate – all scales are ~0
+    double cellSize = (double)radiusScale * (double)maxScale;
+    if (!(cellSize >= 1e-6))
+        return;  // degenerate (all scales ~0) or NaN
 
     // Find bounding box
     float minX = pts[0].xpos, maxX = minX;
@@ -474,25 +477,39 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
     }
+    const double spanX = (double)maxX - (double)minX;
+    const double spanY = (double)maxY - (double)minY;
+    if (!std::isfinite(spanX) || !std::isfinite(spanY))
+        return;  // non-finite coordinates: nothing sensible to suppress
 
-    int gridW = std::max(1, (int)((maxX - minX) / cellSize) + 1);
-    int gridH = std::max(1, (int)((maxY - minY) / cellSize) + 1);
-    // Cap grid to a reasonable size; fall back to flat scan for tiny cells
-    const int MAX_CELLS = 4096 * 4096;
-    bool useGrid = ((long long)gridW * gridH) <= MAX_CELLS;
+    // Bound the grid by the keypoint count rather than a fixed cell cap: the
+    // old 16M-cell limit let a large image with a small largest scale allocate
+    // ~400 MB of std::vector headers per call.  If the natural grid has more
+    // than ~4 cells per point, coarsen the cells.  cellSize only ever grows, so
+    // it still covers every radius and the result is unchanged.
+    const double maxCells = std::max(1024.0, 4.0 * (double)n);
+    const double cells = (std::floor(spanX / cellSize) + 1.0) * (std::floor(spanY / cellSize) + 1.0);
+    if (cells > maxCells)
+        cellSize *= std::sqrt(cells / maxCells);
+    const int gridW = (int)std::floor(spanX / cellSize) + 1;
+    const int gridH = (int)std::floor(spanY / cellSize) + 1;
 
-    // Map from grid cell → list of point indices (in scale-descending order)
-    std::vector<std::vector<int>> grid;
-    if (useGrid) {
-        grid.resize((size_t)gridW * gridH);
-        for (int i = 0; i < n; i++) {
-            int idx = order[i];
-            int cx = (int)((pts[idx].xpos - minX) / cellSize);
-            int cy = (int)((pts[idx].ypos - minY) / cellSize);
-            cx = std::min(cx, gridW - 1);
-            cy = std::min(cy, gridH - 1);
-            grid[(size_t)cy * gridW + cx].push_back(idx);
-        }
+    auto cellOf = [cellSize](float v, float lo, int gridN) -> int {
+        double c = ((double)v - (double)lo) / cellSize;
+        if (!(c > 0.0))
+            return 0;  // also catches NaN
+        if (c >= (double)(gridN - 1))
+            return gridN - 1;
+        return (int)c;
+    };
+
+    // Map from grid cell -> list of point indices (in scale-descending order)
+    std::vector<std::vector<int>> grid((size_t)gridW * (size_t)gridH);
+    for (int i = 0; i < n; i++) {
+        int idx = order[i];
+        int cx = cellOf(pts[idx].xpos, minX, gridW);
+        int cy = cellOf(pts[idx].ypos, minY, gridH);
+        grid[(size_t)cy * gridW + cx].push_back(idx);
     }
 
     // --- Suppression pass ------------------------------------------------
@@ -508,46 +525,30 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
         float ri = radiusScale * pts[i].scale;
         float ri2 = ri * ri;
 
-        if (useGrid) {
-            int cx = (int)((xi - minX) / cellSize);
-            int cy = (int)((yi - minY) / cellSize);
-            cx = std::min(cx, gridW - 1);
-            cy = std::min(cy, gridH - 1);
+        int cx = cellOf(xi, minX, gridW);
+        int cy = cellOf(yi, minY, gridH);
 
-            // Check 5×5 neighbourhood to handle keypoints whose radius
-            // spans more than one cell (smaller scales use smaller radii,
-            // but the *current* large-scale point's radius may reach far).
-            int reach = std::max(1, (int)(ri / cellSize) + 1);
-            int gx0 = std::max(0, cx - reach);
-            int gx1 = std::min(gridW - 1, cx + reach);
-            int gy0 = std::max(0, cy - reach);
-            int gy1 = std::min(gridH - 1, cy + reach);
+        // ri <= cellSize by construction, so a radius reaches at most into the
+        // adjacent cell; widen to 2 only when it sits right on the boundary.
+        int reach = ((double)ri >= cellSize) ? 2 : 1;
+        int gx0 = std::max(0, cx - reach);
+        int gx1 = std::min(gridW - 1, cx + reach);
+        int gy0 = std::max(0, cy - reach);
+        int gy1 = std::min(gridH - 1, cy + reach);
 
-            for (int gy = gy0; gy <= gy1; gy++) {
-                for (int gx = gx0; gx <= gx1; gx++) {
-                    for (int j : grid[(size_t)gy * gridW + gx]) {
-                        if (j == i || suppressed[j])
-                            continue;
-                        // j must be smaller-or-equal scale (processed after i)
-                        if (pts[j].scale > pts[i].scale)
-                            continue;
-                        float dx = pts[j].xpos - xi;
-                        float dy = pts[j].ypos - yi;
-                        if (dx * dx + dy * dy < ri2)
-                            suppressed[j] = true;
-                    }
+        for (int gy = gy0; gy <= gy1; gy++) {
+            for (int gx = gx0; gx <= gx1; gx++) {
+                for (int j : grid[(size_t)gy * gridW + gx]) {
+                    if (j == i || suppressed[j])
+                        continue;
+                    // j must be smaller-or-equal scale (processed after i)
+                    if (pts[j].scale > pts[i].scale)
+                        continue;
+                    float dx = pts[j].xpos - xi;
+                    float dy = pts[j].ypos - yi;
+                    if (dx * dx + dy * dy < ri2)
+                        suppressed[j] = true;
                 }
-            }
-        } else {
-            // Flat scan fallback
-            for (int jj = ii + 1; jj < n; jj++) {
-                int j = order[jj];
-                if (suppressed[j])
-                    continue;
-                float dx = pts[j].xpos - xi;
-                float dy = pts[j].ypos - yi;
-                if (dx * dx + dy * dy < ri2)
-                    suppressed[j] = true;
             }
         }
     }
