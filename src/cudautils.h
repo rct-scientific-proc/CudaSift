@@ -29,6 +29,16 @@ struct CusiftError : public std::runtime_error
 #define safeThreadSync() cusift_safe_thread_sync(__FILE__, __LINE__)
 #define checkMsg(msg) cusift_check_msg(msg, __FILE__, __LINE__)
 
+// Throw a CusiftError without a literal `throw` at the call site.  Several of
+// the library's error-reporting entry points are declared extern "C" and rely
+// on the exception propagating up to cusift_api_guard; a literal throw in such
+// a function trips MSVC's C4297 ("assumed not to throw but does").  Routing
+// through this helper keeps that established error model without the warning.
+[[noreturn]] inline void cusift_fail(const char *file, int line, const std::string &msg, cudaError_t ce = cudaSuccess)
+{
+    throw CusiftError(file, line, msg, ce);
+}
+
 inline void cusift_safe_call(cudaError err, const char *file, const int line)
 {
     if (cudaSuccess != err)

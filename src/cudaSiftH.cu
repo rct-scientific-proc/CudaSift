@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <climits>
 #include <cmath>
 #include <iostream>
 #include <algorithm>
@@ -85,6 +86,21 @@ void FreeSiftTempMemory(float *memoryTmp)
 // Keep
 void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initBlur, float thresh, float lowestScale, float highestScale, float edgeLimit, float *tempMemory)
 {
+    // Never publish a stale count: if anything below throws, the caller sees 0.
+    siftData->numPts = 0;
+    // The public API clamps octaves to [3, 7]; this internal entry point did
+    // not, and numOctaves >= 8 overflowed the kernel[] table below and the
+    // 17-entry device counter, while numOctaves <= 0 read d_pointCounter[-1].
+    if (numOctaves < 1 || numOctaves > 7)
+        cusift_fail(__FILE__, __LINE__, "ExtractSift: numOctaves must be in [1, 7]");
+    if (siftData->d_data == NULL || siftData->maxPts <= 0)
+        cusift_fail(__FILE__, __LINE__, "ExtractSift: SiftData is not initialised (call InitSiftData first)");
+    if (img->d_data == NULL || img->width <= 0 || img->height <= 0)
+        cusift_fail(__FILE__, __LINE__, "ExtractSift: image has no device data");
+    // Row offsets inside the kernels are still 32-bit; one plane must fit.
+    if ((size_t)img->pitch * (size_t)img->height > (size_t)INT_MAX)
+        cusift_fail(__FILE__, __LINE__, "ExtractSift: image too large (pitch * height must fit in a 32-bit int)");
+
     // ---- Per-call device context (replaces module-level __constant__/__device__ globals) ----
     SiftDeviceContext ctx;
     ctx.maxNumPoints = siftData->maxPts;
@@ -145,17 +161,22 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     // instead dropped the finest octave's secondary orientations (a real
     // undercount, since that octave usually yields the most keypoints).
     // Safe because numOctaves is capped at 7 → index 15 < counter length 17.
-    safeCall(cudaMemcpy(&siftData->numPts, &ctx.d_pointCounter[2 * numOctaves + 1], sizeof(int), cudaMemcpyDeviceToHost));
-    siftData->numPts = (siftData->numPts < siftData->maxPts ? siftData->numPts : siftData->maxPts);
+    unsigned int devCount = 0;
+    safeCall(cudaMemcpy(&devCount, &ctx.d_pointCounter[2 * numOctaves + 1], sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    const int numPts = (devCount < (unsigned int)siftData->maxPts) ? (int)devCount : siftData->maxPts;
 
     // Sync device before sorting and copying to host
     safeCall(cudaDeviceSynchronize());
 
     // Sort by ypos, then xpos, then scale using thrust
-    thrust::sort(thrust::device, siftData->d_data, siftData->d_data + siftData->numPts, SiftPointCompare());
+    thrust::sort(thrust::device, siftData->d_data, siftData->d_data + numPts, SiftPointCompare());
 
     if (siftData->h_data)
-        safeCall(cudaMemcpy(siftData->h_data, siftData->d_data, sizeof(SiftPoint) * siftData->numPts, cudaMemcpyDeviceToHost));
+        safeCall(cudaMemcpy(siftData->h_data, siftData->d_data, sizeof(SiftPoint) * (size_t)numPts, cudaMemcpyDeviceToHost));
+    // Publish the count only once h_data is valid, so a throw from the sync,
+    // the sort (thrust allocates temporary storage) or the copy never leaves
+    // numPts > 0 over unwritten host memory.
+    siftData->numPts = numPts;
     // lowImgGuard, memoryTmpGuard, and contextMemGuard are cleaned up automatically
 }
 
@@ -224,23 +245,48 @@ void ExtractSiftOctave(SiftData *siftData, CudaImage *img, int octave, float thr
 }
 
 // Keep
-// NOTE: This treats *data as uninitialized (write-only) — it never reads the
-// incoming h_data/d_data pointers, because callers are permitted to pass a
-// fresh, uninitialized struct (see test/main.cpp: `SiftData sd1, sd2;`).
-// Consequently it CANNOT free pre-existing buffers here (the pointers may be
-// garbage). Reusing a populated SiftData without an intervening FreeSiftData()
-// therefore leaks — see the contract note in cudaSift.h.
+// NOTE: This treats *data as write-only: it never reads or frees the incoming
+// h_data/d_data pointers (the public entry points call FreeSiftData() first,
+// under the zero-initialisation contract documented in cusift.h).  On any
+// failure the struct is left empty (maxPts == 0, NULL buffers) so that
+// FreeSiftData() is always safe afterwards.
 void InitSiftData(SiftData *data, int num, bool host, bool dev)
 {
     data->numPts = 0;
-    data->maxPts = num;
-    int sz = sizeof(SiftPoint) * num;
+    data->maxPts = 0;
     data->h_data = NULL;
-    if (host)
-        data->h_data = (SiftPoint *)malloc(sz);
     data->d_data = NULL;
+    // The byte count used to be computed in a 32-bit int: a large num silently
+    // wrapped to a tiny allocation while maxPts kept the large value, and every
+    // kernel then wrote past the buffer.  Validate, and size in size_t.
+    const int maxNum = (int)(INT_MAX / sizeof(SiftPoint));
+    if (num <= 0 || num > maxNum)
+        cusift_fail(__FILE__, __LINE__, "InitSiftData: number of keypoints must be in [1, " + std::to_string(maxNum) + "]");
+    const size_t sz = sizeof(SiftPoint) * (size_t)num;
+    if (host)
+    {
+        // calloc, not malloc: the caller may read fields the extraction kernels
+        // never write, and heap garbage must not be exported as keypoint data.
+        data->h_data = (SiftPoint *)calloc((size_t)num, sizeof(SiftPoint));
+        if (data->h_data == NULL)
+            cusift_fail(__FILE__, __LINE__, "InitSiftData: host allocation of " + std::to_string(sz) + " bytes failed");
+    }
     if (dev)
-        safeCall(cudaMalloc((void **)&data->d_data, sz));
+    {
+        cudaError_t err = cudaMalloc((void **)&data->d_data, sz);
+        if (err == cudaSuccess)
+            err = cudaMemset(data->d_data, 0, sz);
+        if (err != cudaSuccess)
+        {
+            if (data->d_data)
+                cudaFree(data->d_data);
+            data->d_data = NULL;
+            free(data->h_data);
+            data->h_data = NULL;
+            cusift_safe_call(err, __FILE__, __LINE__); // throws
+        }
+    }
+    data->maxPts = num;
 }
 
 // Keep
