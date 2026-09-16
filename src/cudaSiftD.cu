@@ -143,6 +143,15 @@ __device__ float FastAtan2(float y, float x)
     return r;
 }
 
+// Clamp a sub-sample refinement offset to the half-sample a keypoint is allowed
+// to move.  A NaN (from 0/0) maps to 0 rather than to a bound.
+__device__ __forceinline__ float ClampRefineStep(float v)
+{
+    if (!(v > -0.5f))                      // false for NaN, so NaN falls through here
+        return (v <= -0.5f) ? -0.5f : 0.0f;
+    return (v < 0.5f) ? v : 0.5f;
+}
+
 // Keep
 __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftPoint *d_sift, float subsampling, int octave, int d_MaxNumPoints, unsigned int *d_PointCounter)
 {
@@ -560,9 +569,14 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
             float pds = idet * (idxs * dx + idys * dy + idss * ds);
             if (pdx < -0.5f || pdx > 0.5f || pdy < -0.5f || pdy > 0.5f || pds < -0.5f || pds > 0.5f)
             {
-                pdx = __fdividef(dx, dxx);
-                pdy = __fdividef(dy, dyy);
-                pds = __fdividef(ds, dss);
+                // Independent 1-D steps as a fallback.  dxx/dyy/dss can be
+                // arbitrarily small and __fdividef(x, 0) is +/-inf, so bound
+                // each step to the half-sample the refinement may move;
+                // otherwise a keypoint could be reported at a position or scale
+                // well outside the sample it was actually detected in.
+                pdx = ClampRefineStep(__fdividef(dx, dxx));
+                pdy = ClampRefineStep(__fdividef(dy, dyy));
+                pds = ClampRefineStep(__fdividef(ds, dss));
             }
             float dval = 0.5f * (dx * pdx + dy * pdy + ds * pds);
             int maxPts = d_MaxNumPoints;
