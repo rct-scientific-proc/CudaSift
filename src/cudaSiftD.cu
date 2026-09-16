@@ -358,32 +358,47 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
                     i2 = i;
                 }
             }
-            float val1 = hist[32 + ((i1 + 1) & 31)];
-            float val2 = hist[32 + ((i1 + 31) & 31)];
-            float peak = i1 + 0.5f * (val1 - val2) / (2.0f * maxval1 - val1 - val2);
-            d_Sift[bx].orientation = 11.25f * (peak < 0.0f ? peak + 32.0f : peak);
-            if (maxval2 > 0.8f * maxval1)
+            // hist[0..31] holds non-maximum-suppressed values, so a window with
+            // no strict local maximum (perfectly flat, or perfectly symmetric)
+            // leaves every bin at 0, i1 == -1 and maxval1 == 0.  The parabolic
+            // peak fit is then 0/0 = NaN, and a NaN orientation makes the
+            // descriptor kernel sample the texture at NaN coordinates.  The
+            // denominator can also vanish with a positive maximum, so guard it
+            // separately and fall back to the bin centre.
+            if (!(maxval1 > 0.0f))
             {
-                float val1 = hist[32 + ((i2 + 1) & 31)];
-                float val2 = hist[32 + ((i2 + 31) & 31)];
-                float peak = i2 + 0.5f * (val1 - val2) / (2.0f * maxval2 - val1 - val2);
-                unsigned int idx = atomicInc(&d_PointCounter[2 * octave + 1], 0x7fffffff);
-                if (idx < d_MaxNumPoints)
+                d_Sift[bx].orientation = 0.0f;
+            }
+            else
+            {
+                float val1 = hist[32 + ((i1 + 1) & 31)];
+                float val2 = hist[32 + ((i1 + 31) & 31)];
+                float den = 2.0f * maxval1 - val1 - val2;
+                float peak = i1 + (den != 0.0f ? 0.5f * (val1 - val2) / den : 0.0f);
+                d_Sift[bx].orientation = 11.25f * (peak < 0.0f ? peak + 32.0f : peak);
+                if (maxval2 > 0.8f * maxval1)
                 {
-                    d_Sift[idx].xpos = d_Sift[bx].xpos;
-                    d_Sift[idx].ypos = d_Sift[bx].ypos;
-                    d_Sift[idx].scale = d_Sift[bx].scale;
-                    d_Sift[idx].sharpness = d_Sift[bx].sharpness;
-                    d_Sift[idx].edgeness = d_Sift[bx].edgeness;
-                    d_Sift[idx].orientation = 11.25f * (peak < 0.0f ? peak + 32.0f : peak);
-                    ;
-                    d_Sift[idx].subsampling = d_Sift[bx].subsampling;
-                    d_Sift[idx].score = 0.0f;
-                    d_Sift[idx].ambiguity = 0.0f;
-                    d_Sift[idx].match = -1;
-                    d_Sift[idx].match_xpos = 0.0f;
-                    d_Sift[idx].match_ypos = 0.0f;
-                    d_Sift[idx].match_error = 0.0f;
+                    float val1b = hist[32 + ((i2 + 1) & 31)];
+                    float val2b = hist[32 + ((i2 + 31) & 31)];
+                    float den2 = 2.0f * maxval2 - val1b - val2b;
+                    float peak2 = i2 + (den2 != 0.0f ? 0.5f * (val1b - val2b) / den2 : 0.0f);
+                    unsigned int idx = atomicInc(&d_PointCounter[2 * octave + 1], 0x7fffffff);
+                    if (idx < d_MaxNumPoints)
+                    {
+                        d_Sift[idx].xpos = d_Sift[bx].xpos;
+                        d_Sift[idx].ypos = d_Sift[bx].ypos;
+                        d_Sift[idx].scale = d_Sift[bx].scale;
+                        d_Sift[idx].sharpness = d_Sift[bx].sharpness;
+                        d_Sift[idx].edgeness = d_Sift[bx].edgeness;
+                        d_Sift[idx].orientation = 11.25f * (peak2 < 0.0f ? peak2 + 32.0f : peak2);
+                        d_Sift[idx].subsampling = d_Sift[bx].subsampling;
+                        d_Sift[idx].score = 0.0f;
+                        d_Sift[idx].ambiguity = 0.0f;
+                        d_Sift[idx].match = -1;
+                        d_Sift[idx].match_xpos = 0.0f;
+                        d_Sift[idx].match_ypos = 0.0f;
+                        d_Sift[idx].match_error = 0.0f;
+                    }
                 }
             }
         }
