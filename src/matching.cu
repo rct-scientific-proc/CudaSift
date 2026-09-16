@@ -29,13 +29,6 @@ static void ValidateRansacLoops(int numLoops)
 #define FMC2W 16
 #define FMC2H 4
 
-// Keep
-__global__ void CleanMatches(SiftPoint *sift1, int numPts1)
-{
-    const int p1 = min(blockIdx.x * 64 + threadIdx.x, numPts1 - 1);
-    sift1[p1].score = 0.0f;
-}
-
 #define M7W 32
 #define M7H 32
 #define M7R 4
@@ -316,8 +309,10 @@ __global__ void ComputeHomographies(float *coord, int *randPts, float *homo,
         b[2 * i + 0] = x2;
         b[2 * i + 1] = y2;
     }
+    // No __syncthreads() here: a, ia and b are per-thread locals and every
+    // access below is to this thread's own data, so there is nothing to
+    // synchronise.  The two barriers this replaces only serialised the block.
     InvertMatrix<8>(a, ia);
-    __syncthreads();
     for (int j = 0; j < 8; j++)
     {
         float sum = 0.0f;
@@ -325,7 +320,6 @@ __global__ void ComputeHomographies(float *coord, int *randPts, float *homo,
             sum += ia[j][i] * b[i];
         homo[j * numLoops + idx] = sum;
     }
-    __syncthreads();
 }
 
 #define TESTHOMO_TESTS 16 // number of tests per block,  alt. 32, 32
@@ -733,7 +727,9 @@ double MatchSiftData_private(SiftData *data1, SiftData *data2)
     SiftPoint *sift1 = data1->d_data;
     SiftPoint *sift2 = data2->d_data;
 
-    CleanMatches<<<iDivUp(numPts1, 64), 64>>>(sift1, numPts1);
+    // No CleanMatches pass: FindMaxCorr10 below writes score, match,
+    // match_xpos, match_ypos and ambiguity for every p1 < numPts1, so
+    // pre-zeroing the scores was a redundant kernel launch.
     dim3 blocksMax3(iDivUp(numPts1, M7W));
     dim3 threadsMax3(M7W, M7H / M7R);
     FindMaxCorr10<<<blocksMax3, threadsMax3>>>(sift1, sift2, numPts1, numPts2);

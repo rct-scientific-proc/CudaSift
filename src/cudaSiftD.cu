@@ -16,6 +16,14 @@
 // use from multiple threads / processes.
 ///////////////////////////////////////////////////////////////////////////////
 
+// Correctly-rounded float values of pi and pi/2.  FastAtan2 already used
+// these while the descriptor and orientation kernels used 3.1415f / 3.1416f,
+// so the angle a sample was given and the angle it was binned at disagreed by
+// ~0.003%.  Harmless in magnitude, but there is no reason to keep three
+// different values of pi in one file.
+#define CUSIFT_PI_F 3.14159274f
+#define CUSIFT_HALFPI_F 1.57079637f
+
 ///////////////////////////////////////////////////////////////////////////////
 // Lowpass filter and subsample image
 ///////////////////////////////////////////////////////////////////////////////
@@ -137,8 +145,8 @@ __device__ float FastAtan2(float y, float x)
     float a = (maxa > 0.0f) ? __fdiv_rn(min(absx, absy), maxa) : 0.0f;
     float s = a * a;
     float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
-    r = (absy > absx ? 1.57079637f - r : r);
-    r = (x < 0 ? 3.14159274f - r : r);
+    r = (absy > absx ? CUSIFT_HALFPI_F - r : r);
+    r = (x < 0 ? CUSIFT_PI_F - r : r);
     r = (y < 0 ? -r : r);
     return r;
 }
@@ -176,7 +184,7 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
         __syncthreads();
 
         // Compute angles and gradients
-        float theta = 2.0f * 3.1415f / 360.0f * d_sift[bx].orientation;
+        float theta = 2.0f * CUSIFT_PI_F / 360.0f * d_sift[bx].orientation;
         float sina = __sinf(theta); // cosa -sina
         float cosa = __cosf(theta); // sina  cosa
         float scale = 12.0f / 16.0f * d_sift[bx].scale;
@@ -192,7 +200,7 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
             float dy = tex2D<float>(texObj, xpos - sina, ypos + cosa) -
                        tex2D<float>(texObj, xpos + sina, ypos - cosa);
             float grad = gauss[y] * gauss[tx] * __fsqrt_rn(dx * dx + dy * dy);
-            float angf = 4.0f / 3.1415f * FastAtan2(dy, dx) + 4.0f;
+            float angf = 4.0f / CUSIFT_PI_F * FastAtan2(dy, dx) + 4.0f;
 
             int hori = (tx + 2) / 4 - 1; // Convert from (tx,y,angle) to bins
             float horf = (tx - 1.5f) / 4.0f - hori;
@@ -323,7 +331,7 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
         {
             float dx = tex2D<float>(texObj, xf + 1.0, yf) - tex2D<float>(texObj, xf - 1.0, yf);
             float dy = tex2D<float>(texObj, xf, yf + 1.0) - tex2D<float>(texObj, xf, yf - 1.0);
-            int bin = 16.0f * atan2f(dy, dx) / 3.1416f + 16.5f;
+            int bin = 16.0f * atan2f(dy, dx) / CUSIFT_PI_F + 16.5f;
             if (bin > 31)
                 bin = 0;
             float grad = sqrtf(dx * dx + dy * dy);
