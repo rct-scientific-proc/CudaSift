@@ -109,7 +109,7 @@ static inline float SampleBilinear(const float *img, int w, int h, float x, floa
 static __global__ void WarpDualKernel(
     const float *__restrict__ src1, float *__restrict__ dst1, int src1W, int src1H, int src1Pitch,
     const float *__restrict__ src2, float *__restrict__ dst2, int src2W, int src2H, int src2Pitch,
-    int dstW, int dstH, int dstPitch, float originU, float originV,
+    int dstW, int dstH, int dst1Pitch, int dst2Pitch, float originU, float originV,
     float h00, float h01, float h02, float h10, float h11, float h12, float h20, float h21, float h22);
 
 // ── Thread-local error storage ──────────────────────────
@@ -736,11 +736,12 @@ inline float SampleBilinear(const float *img, int w, int h, float x, float y)
 // Image 1 is identity-warped (translated into canvas).
 // Image 2 is warped through the supplied homography.
 // srcPitch / dstPitch are row strides in floats (may differ from width
-// when the allocation is pitch-aligned).
+// when the allocation is pitch-aligned).  dst1 and dst2 come from separate
+// cudaMallocPitch calls and each is written with its own stride.
 __global__ void WarpDualKernel(
     const float *__restrict__ src1, float *__restrict__ dst1, int src1W, int src1H, int src1Pitch,
     const float *__restrict__ src2, float *__restrict__ dst2, int src2W, int src2H, int src2Pitch,
-    int dstW, int dstH, int dstPitch, float originU, float originV,
+    int dstW, int dstH, int dst1Pitch, int dst2Pitch, float originU, float originV,
     float h00, float h01, float h02,
     float h10, float h11, float h12,
     float h20, float h21, float h22)
@@ -766,7 +767,7 @@ __global__ void WarpDualKernel(
         float fy = v - (float)y0;
         val1 = (1.0f - fx) * (1.0f - fy) * src1[y0 * src1Pitch + x0] + fx * (1.0f - fy) * src1[y0 * src1Pitch + x1] + (1.0f - fx) * fy * src1[y1 * src1Pitch + x0] + fx * fy * src1[y1 * src1Pitch + x1];
     }
-    dst1[y * dstPitch + x] = val1;
+    dst1[y * dst1Pitch + x] = val1;
 
     // ── Image 2: homography warp ──
     float z = h20 * u + h21 * v + h22;
@@ -784,7 +785,7 @@ __global__ void WarpDualKernel(
         float fy = sy - (float)y0;
         val2 = (1.0f - fx) * (1.0f - fy) * src2[y0 * src2Pitch + x0] + fx * (1.0f - fy) * src2[y0 * src2Pitch + x1] + (1.0f - fx) * fy * src2[y1 * src2Pitch + x0] + fx * fy * src2[y1 * src2Pitch + x1];
     }
-    dst2[y * dstPitch + x] = val2;
+    dst2[y * dst2Pitch + x] = val2;
 }
 
 // ── Main entry point ────────────────────────────────────
@@ -901,6 +902,7 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
             int src1StrideElem = (int)(src1Pitch / sizeof(float));
             int src2StrideElem = (int)(src2Pitch / sizeof(float));
             int out1StrideElem = (int)(out1Pitch / sizeof(float));
+            int out2StrideElem = (int)(out2Pitch / sizeof(float));
             // out2 stride same width as out1 since both are outW
 
             dim3 threads(16, 16);
@@ -910,7 +912,7 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
             WarpDualKernel<<<blocks, threads>>>(
                 d_src1Guard.get(), d_out1Guard.get(), w1, h1, src1StrideElem,
                 d_src2Guard.get(), d_out2Guard.get(), w2, h2, src2StrideElem,
-                outW, outH, out1StrideElem, originU, originV,
+                outW, outH, out1StrideElem, out2StrideElem, originU, originV,
                 H00, H01, H02,
                 H10, H11, H12,
                 H20, H21, H22);
@@ -1050,6 +1052,7 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
         int src1StrideElem = (int)(src1Pitch / sizeof(float));
         int src2StrideElem = (int)(src2Pitch / sizeof(float));
         int out1StrideElem = (int)(out1Pitch / sizeof(float));
+        int out2StrideElem = (int)(out2Pitch / sizeof(float));
 
         float H00 = homography[0], H01 = homography[1], H02 = homography[2];
         float H10 = homography[3], H11 = homography[4], H12 = homography[5];
@@ -1061,7 +1064,7 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
         WarpDualKernel<<<blocks, threads>>>(
             d_src1Guard.get(), d_out1Guard.get(), w1, h1, src1StrideElem,
             d_src2Guard.get(), d_out2Guard.get(), w2, h2, src2StrideElem,
-            outW, outH, out1StrideElem, originU, originV,
+            outW, outH, out1StrideElem, out2StrideElem, originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
@@ -1248,7 +1251,8 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
         WarpDualKernel<<<blocks, threads>>>(
             d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
             d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
-            outW, outH, static_cast<int>(out1Stride / sizeof(float)), originU, originV,
+            outW, outH, static_cast<int>(out1Stride / sizeof(float)),
+            static_cast<int>(out2Stride / sizeof(float)), originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
@@ -1438,7 +1442,8 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
         WarpDualKernel<<<blocks, threads>>>(
             d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
             d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
-            outW, outH, static_cast<int>(out1Stride / sizeof(float)), originU, originV,
+            outW, outH, static_cast<int>(out1Stride / sizeof(float)),
+            static_cast<int>(out2Stride / sizeof(float)), originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
@@ -1665,7 +1670,8 @@ void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const
         WarpDualKernel<<<blocks, threads>>>(
             d_src1, d_out1Guard.get(), w1, h1, src1Pitch,
             d_src2, d_out2Guard.get(), w2, h2, src2Pitch,
-            outW, outH, static_cast<int>(out1Stride / sizeof(float)), originU, originV,
+            outW, outH, static_cast<int>(out1Stride / sizeof(float)),
+            static_cast<int>(out2Stride / sizeof(float)), originU, originV,
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
