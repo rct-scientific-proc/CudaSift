@@ -130,7 +130,11 @@ __device__ float FastAtan2(float y, float x)
 {
     float absx = abs(x);
     float absy = abs(y);
-    float a = __fdiv_rn(min(absx, absy), max(absx, absy));
+    // __fdiv_rn(0, 0) is NaN.  An exactly-zero gradient (a flat region, or a
+    // sample clamped outside the image) must produce a defined angle instead
+    // of a NaN that then poisons the caller's histogram.
+    float maxa = max(absx, absy);
+    float a = (maxa > 0.0f) ? __fdiv_rn(min(absx, absy), maxa) : 0.0f;
     float s = a * a;
     float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
     r = (absy > absx ? 1.57079637f - r : r);
@@ -196,7 +200,10 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
             int hist = 8 * (4 * veri + hori); // Each gradient measure is interpolated
             int p1 = angi + hist;             // in angles, xpos and ypos -> 8 stores
             int p2 = angp + hist;
-            if (tx >= 2)
+            // A zero gradient contributes nothing; skipping it also spares the
+            // shared-memory atomics over flat regions, where every thread of
+            // the block takes the same branch.
+            if (grad > 0.0f && tx >= 2)
             {
                 float grad1 = ihorf * grad;
                 if (y >= 2)
@@ -212,7 +219,7 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
                     atomicAdd(buffer + p2 + 32, angf * grad2);
                 }
             }
-            if (tx <= 13)
+            if (grad > 0.0f && tx <= 13)
             {
                 float grad1 = horf * grad;
                 if (y >= 2)
@@ -238,8 +245,15 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
         if ((idx & 31) == 0)
             sums[idx / 32] = sum;
         __syncthreads();
-        float tsum1 = sums[0] + sums[1] + sums[2] + sums[3];
-        tsum1 = min(buffer[idx] * rsqrtf(tsum1), 0.2f);
+        // A window with no gradient anywhere leaves the histogram all zero.
+        // rsqrtf(0) is +inf and 0 * inf is NaN, but min() is fminf(), which
+        // silently discards the NaN and returns 0.2f -- so every bin clipped to
+        // 0.2 and the descriptor became the constant vector 1/sqrt(128), which
+        // correlates perfectly with every other degenerate descriptor and was
+        // handed to RANSAC as a pile of ideal matches.  Emit a zero descriptor
+        // instead: it scores 0 against everything.
+        float tsumsq1 = sums[0] + sums[1] + sums[2] + sums[3];
+        float tsum1 = (tsumsq1 > 0.0f) ? min(buffer[idx] * rsqrtf(tsumsq1), 0.2f) : 0.0f;
 
         __syncthreads(); // Ensure all threads have read sums[] before any thread overwrites it
         sum = tsum1 * tsum1;
@@ -251,7 +265,7 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
 
         float tsum2 = sums[0] + sums[1] + sums[2] + sums[3];
         float *desc = d_sift[bx].data;
-        desc[idx] = tsum1 * rsqrtf(tsum2);
+        desc[idx] = (tsum2 > 0.0f) ? tsum1 * rsqrtf(tsum2) : 0.0f;
         if (idx == 0)
         {
             d_sift[bx].xpos *= subsampling;
