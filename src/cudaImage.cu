@@ -84,84 +84,87 @@ void CudaImage_Readback(CudaImage *img)
 // Min-Max normalization: maps pixel values to [0, 1]
 ///////////////////////////////////////////////////////////////////////////////
 
+// Ordered float atomics.  atomicMin/atomicMax on the raw int bits only order
+// non-negative floats correctly, and the caller reads these back as plain
+// floats, so a monotonic bit-flip encoding would have to be undone on the host.
+// A CAS loop is cheap here: it runs once per block, not once per pixel.
+__device__ __forceinline__ void atomicMinFloat(float *addr, float value)
+{
+    int *as_int = (int *)addr;
+    int old = *as_int, assumed;
+    do
+    {
+        assumed = old;
+        if (__int_as_float(assumed) <= value)
+            break;
+        old = atomicCAS(as_int, assumed, __float_as_int(value));
+    } while (assumed != old);
+}
+
+__device__ __forceinline__ void atomicMaxFloat(float *addr, float value)
+{
+    int *as_int = (int *)addr;
+    int old = *as_int, assumed;
+    do
+    {
+        assumed = old;
+        if (__int_as_float(assumed) >= value)
+            break;
+        old = atomicCAS(as_int, assumed, __float_as_int(value));
+    } while (assumed != old);
+}
+
 __global__ void MinMaxKernel(float *d_data, int width, int pitch, int height, float *d_min, float *d_max)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    float val = (x < width && y < height) ? d_data[y * pitch + x] : 0.0f;
-    bool valid = (x < width && y < height);
+    // Out-of-range lanes carry the identity element, which removes the need to
+    // track per-lane validity through the reduction.
+    const bool inRange = (x < width && y < height);
+    const float v = inRange ? d_data[(size_t)y * pitch + x] : 0.0f;
+    float mn = inRange ? v : FLT_MAX;
+    float mx = inRange ? v : -FLT_MAX;
 
-    // Warp-level reduction
+    // Warp reduction.  Every thread of the block reaches this, so the full mask
+    // is valid (the previous version called __any_sync from inside a
+    // lane-0-only branch, which is undefined).
     for (int offset = 16; offset > 0; offset >>= 1)
     {
-        float other = __shfl_down_sync(0xffffffff, val, offset);
-        bool otherValid = __shfl_down_sync(0xffffffff, (int)valid, offset);
-        if (otherValid && (!valid || other < val))
-        {
-            val = other;
-            valid = true;
-        }
+        mn = fminf(mn, __shfl_down_sync(0xffffffff, mn, offset));
+        mx = fmaxf(mx, __shfl_down_sync(0xffffffff, mx, offset));
     }
-    float warpMin = val;
 
-    // Reset for max reduction
-    val = (x < width && y < height) ? d_data[y * pitch + x] : 0.0f;
-    valid = (x < width && y < height);
-    for (int offset = 16; offset > 0; offset >>= 1)
-    {
-        float other = __shfl_down_sync(0xffffffff, val, offset);
-        bool otherValid = __shfl_down_sync(0xffffffff, (int)valid, offset);
-        if (otherValid && (!valid || other > val))
-        {
-            val = other;
-            valid = true;
-        }
-    }
-    float warpMax = val;
+    const int lane = threadIdx.x + threadIdx.y * blockDim.x;
+    const int warpId = lane >> 5;
+    const int laneInWarp = lane & 31;
+    const int numWarps = (blockDim.x * blockDim.y + 31) / 32;
 
-    int lane = threadIdx.x + threadIdx.y * blockDim.x;
-    int warpId = lane / 32;
-    int laneInWarp = lane % 32;
-
-    __shared__ float sMin[8]; // up to 256 threads = 8 warps
-    __shared__ float sMax[8];
-    __shared__ bool sValid[8];
-
+    __shared__ float sMin[32]; // up to 1024 threads = 32 warps
+    __shared__ float sMax[32];
     if (laneInWarp == 0)
     {
-        sMin[warpId] = warpMin;
-        sMax[warpId] = warpMax;
-        sValid[warpId] = (x < width && y < height) || __any_sync(0xffffffff, (x < width && y < height));
+        sMin[warpId] = mn;
+        sMax[warpId] = mx;
     }
     __syncthreads();
 
-    // Final reduction across warps in first warp
-    int numWarps = (blockDim.x * blockDim.y + 31) / 32;
-    if (lane < numWarps)
+    // Fold the per-warp results in one thread.  The previous tree reduction
+    // read sMin[lane + offset] but never wrote the partial results back to
+    // shared memory, so all but a few warps were silently discarded.
+    if (lane == 0)
     {
-        float localMin = sMin[lane];
-        float localMax = sMax[lane];
-        bool localValid = sValid[lane];
-        for (int offset = numWarps / 2; offset > 0; offset >>= 1)
+        float bmn = sMin[0];
+        float bmx = sMax[0];
+        for (int w = 1; w < numWarps; w++)
         {
-            if (lane + offset < numWarps)
-            {
-                if (sValid[lane + offset] && (!localValid || sMin[lane + offset] < localMin))
-                {
-                    localMin = sMin[lane + offset];
-                    localValid = true;
-                }
-                if (sValid[lane + offset] && sMax[lane + offset] > localMax)
-                    localMax = sMax[lane + offset];
-            }
+            bmn = fminf(bmn, sMin[w]);
+            bmx = fmaxf(bmx, sMax[w]);
         }
-        if (lane == 0 && localValid)
+        if (bmn <= bmx) // false only when the block covered no valid pixel
         {
-            atomicMin((int *)d_min, __float_as_int(localMin));
-            // atomicMax for floats: use int atomicMax with sign-magnitude trick
-            // Since we expect non-negative pixel values, __float_as_int preserves order
-            atomicMax((int *)d_max, __float_as_int(localMax));
+            atomicMinFloat(d_min, bmn);
+            atomicMaxFloat(d_max, bmx);
         }
     }
 }
