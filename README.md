@@ -55,6 +55,9 @@ test/
     main.cpp                 17-test correctness/regression suite
     speed.cpp                Multi-resolution benchmarking harness
     img1.png, img2.png       Sample image pair
+docs/
+    kernel-correctness-fixes-v2.3.0.md
+                             v2.3.0 kernel fixes, and what init_blur_ means
 cusift_py/
     cusift/                  Python package (ctypes bindings)
 examples/
