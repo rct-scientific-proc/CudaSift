@@ -242,11 +242,14 @@ extern "C"
      * -- Scale-space construction -----------------------------------------
      *
      *   init_blur_     [~1.0]
-     *       Assumed blur level (sigma) of the input image.  The
-     *       library applies a low-pass filter so that the effective
-     *       blur of the base image matches the first scale of the
-     *       Gaussian pyramid. A value of 0.0
-     *       means the input is essentially unblurred.
+     *       Sigma of the Gaussian pre-blur applied to the input
+     *       before the scale-space pyramid is built.  The pyramid's
+     *       own scales are measured *relative* to this pre-blurred
+     *       base image, so a keypoint reported at scale s sits at a
+     *       total blur of sqrt(init_blur_^2 + s^2).  Larger values
+     *       suppress fine detail and noise; 0.0 disables the
+     *       pre-blur and keeps the input as-is.  Any non-negative
+     *       value is valid.
      *
      *   num_octaves_   [5]
      *       Number of octave levels in the scale-space pyramid.  Each

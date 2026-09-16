@@ -150,7 +150,16 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     CudaImageGuard lowImgGuard;
     CudaImage_Allocate(lowImgGuard.get(), width, height, iAlignUp(width, 128), false, memorySub, NULL);
     float kernel[8 * 12 * 16];
-    PrepareLaplaceKernels(numOctaves, initBlur, kernel);
+    // Pass 0.0f, NOT initBlur.  LowPass() below already blurs the input by
+    // initBlur, so the pyramid's per-level Gaussians are relative to that
+    // base: level i needs sigma = scale_i, giving a total blur of
+    // sqrt(initBlur^2 + scale_i^2).  Passing initBlur here subtracted it a
+    // second time (var = scale_i^2 - initBlur^2), and since the finest
+    // octave's first level has scale_0 = 2^(-1/5) = 0.8706, any
+    // init_blur_ >= 0.8706 -- including the documented default of 1.0 --
+    // made var <= 0 and produced inf/NaN Gaussian taps, so the two finest
+    // scale levels of the finest octave yielded no keypoints at all.
+    PrepareLaplaceKernels(numOctaves, 0.0f, kernel);
     safeCall(cudaMemcpy(ctx.d_laplaceKernel, kernel, laplaceBytes, cudaMemcpyHostToDevice));
     LowPass(lowImgGuard.get(), img, max(initBlur, 0.001f), ctx);
     ExtractSiftLoop(siftData, lowImgGuard.get(), numOctaves, initBlur, thresh, lowestScale, highestScale, edgeLimit, 1.0f, memoryTmp, memorySub + (size_t)height * iAlignUp(width, 128), ctx);
@@ -191,6 +200,9 @@ int ExtractSiftLoop(SiftData *siftData, CudaImage *img, int numOctaves, float in
         int p = iAlignUp(w / 2, 128);
         CudaImage_Allocate(subImgGuard.get(), w / 2, h / 2, p, false, memorySub, NULL);
         ScaleDown(subImgGuard.get(), img, 0.5f, ctx);
+        // NOTE: initBlur only feeds this recursion -- ExtractSiftOctave() does
+        // not take it and the pyramid kernels are prepared separately in
+        // ExtractSift() -- so it has no effect on the output.
         float totInitBlur = (float)sqrt(initBlur * initBlur + 0.5f * 0.5f) / 2.0f;
         ExtractSiftLoop(siftData, subImgGuard.get(), numOctaves - 1, totInitBlur, thresh, lowestScale, highestScale, edgeLimit, subsampling * 2.0f, memoryTmp, memorySub + (size_t)(h / 2) * p, ctx);
     }
@@ -393,6 +405,11 @@ void PrepareLaplaceKernels(int numOctaves, float initBlur, float *kernel)
     {
         float kernelSum = 0.0f;
         float var = scale * scale - initBlur * initBlur;
+        // A non-positive variance makes expf(-j*j/2/var) return inf or NaN and
+        // poisons the whole DoG plane.  Clamp to a tiny positive value, which
+        // degenerates to an identity filter (taps [1, 0, 0, 0, 0]) instead.
+        if (!(var > 1e-6f))
+            var = 1e-6f;
         for (int j = 0; j <= LAPLACE_R; j++)
         {
             kernel[numOctaves * 12 * 16 + 16 * i + j] = expf(-(float)j * j / 2.0f / var);
