@@ -20,7 +20,7 @@ elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 project(cudaSift
-  VERSION 2.4.0
+  VERSION 2.5.0
   LANGUAGES C CXX CUDA
 )
 
