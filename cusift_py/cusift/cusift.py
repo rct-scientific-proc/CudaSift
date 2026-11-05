@@ -21,6 +21,7 @@ from cusift._bindings import (
     Image_t,
     SiftData,
     SiftPoint,
+    WarpGeometry_t,
     load_library,
 )
 
@@ -151,6 +152,38 @@ class MatchResult:
 
     ambiguity: float
     """Match ambiguity of the query keypoint."""
+
+
+@dataclass
+class WarpGeometry:
+    """Where the two inputs land on the common canvas (see ``WarpGeometry_t``).
+
+    Returned by :meth:`CuSift.compute_warp_geometry`.  The canvas is image 1's
+    frame extended to hold image 2; canvas pixel ``(0, 0)`` is image-1
+    coordinate ``origin``.  Corners are in canvas pixel coordinates, in the
+    order ``(0, 0), (w-1, 0), (w-1, h-1), (0, h-1)`` of the source image.
+    """
+
+    origin: tuple[int, int]
+    """``(origin_u, origin_v)``: image-1 coordinate of canvas pixel (0, 0); both <= 0."""
+
+    canvas_size: tuple[int, int]
+    """``(width, height)`` of the warped images."""
+
+    corners1: np.ndarray
+    """``(4, 2)`` float32 array: image-1 corners on the canvas (integers)."""
+
+    corners2: np.ndarray
+    """``(4, 2)`` float32 array: image-2 corners on the canvas (sub-pixel)."""
+
+    @classmethod
+    def _from_ctypes(cls, g: WarpGeometry_t) -> "WarpGeometry":
+        return cls(
+            origin=(int(g.origin_u), int(g.origin_v)),
+            canvas_size=(int(g.canvas_width), int(g.canvas_height)),
+            corners1=np.array([[g.corners1[i][0], g.corners1[i][1]] for i in range(4)], dtype=np.float32),
+            corners2=np.array([[g.corners2[i][0], g.corners2[i][1]] for i in range(4)], dtype=np.float32),
+        )
 
 
 @dataclass
@@ -722,6 +755,65 @@ class CuSift:
             # Free the C-allocated pixel buffers via the library's own free
             self._lib.FreeImage(byref(warped1_ct))
             self._lib.FreeImage(byref(warped2_ct))
+
+    def compute_warp_geometry(
+        self,
+        homography: np.ndarray,
+        width1: int,
+        height1: int,
+        width2: int,
+        height2: int,
+    ) -> WarpGeometry:
+        """Compute the canvas that :meth:`warp_images` would produce, without warping.
+
+        Calls the C ``ComputeWarpGeometry`` function: a constant-time,
+        host-only computation that reports the canvas size, its origin in
+        image-1 coordinates, and where the four corners of each input land
+        on the canvas.  The values are exactly those the warp uses.
+
+        Parameters
+        ----------
+        homography : numpy.ndarray
+            A ``(3, 3)`` homography matrix (image 1 to image 2), as returned
+            by :meth:`find_homography`.
+        width1, height1 : int
+            Size of image 1 in pixels.
+        width2, height2 : int
+            Size of image 2 in pixels.
+
+        Returns
+        -------
+        WarpGeometry
+
+        Raises
+        ------
+        CuSiftError
+            If the homography is non-finite or singular, a dimension is not
+            positive, or the canvas would exceed twice the larger input in
+            either axis (the same limit the warp enforces).  For the
+            canvas-size case the rejected geometry is attached to the
+            exception as ``err.geometry``.
+        """
+        H_flat = np.ascontiguousarray(np.asarray(homography, dtype=np.float32).ravel())
+        if H_flat.size != 9:
+            raise ValueError(
+                f"homography must have 9 elements (3x3), got shape {np.shape(homography)}"
+            )
+        h_ct = H_flat.ctypes.data_as(POINTER(c_float))
+        geom_ct = WarpGeometry_t()
+
+        self._lib.ComputeWarpGeometry(
+            h_ct,
+            c_int(int(width1)), c_int(int(height1)),
+            c_int(int(width2)), c_int(int(height2)),
+            byref(geom_ct),
+        )
+        try:
+            _check_error(self._lib)
+        except CuSiftError as err:
+            err.geometry = WarpGeometry._from_ctypes(geom_ct)  # type: ignore[attr-defined]
+            raise
+        return WarpGeometry._from_ctypes(geom_ct)
 
     # -- Convenience combo pipelines --------------------------------------
 

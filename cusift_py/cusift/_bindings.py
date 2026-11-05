@@ -59,6 +59,19 @@ class Image_t(Structure):
     ]
 
 
+class WarpGeometry_t(Structure):
+    """Mirror of the C ``WarpGeometry_t`` struct."""
+
+    _fields_ = [
+        ("origin_u", c_int),
+        ("origin_v", c_int),
+        ("canvas_width", c_int),
+        ("canvas_height", c_int),
+        ("corners1", (c_float * 2) * 4),
+        ("corners2", (c_float * 2) * 4),
+    ]
+
+
 class ExtractSiftOptions_t(Structure):
     """Mirror of the C ``ExtractSiftOptions_t`` struct."""
 
@@ -194,6 +207,15 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
         POINTER(Image_t),  # warped_image1  (out)
         POINTER(Image_t),  # warped_image2  (out)
         c_bool,            # useGPU
+    ]
+
+    # Canvas geometry (no warp)
+    lib.ComputeWarpGeometry.restype = None
+    lib.ComputeWarpGeometry.argtypes = [
+        POINTER(c_float),          # homography
+        c_int, c_int,              # image_width1, image_height1
+        c_int, c_int,              # image_width2, image_height2
+        POINTER(WarpGeometry_t),   # geometry (out)
     ]
 
     # Cleanup

@@ -52,7 +52,7 @@ src/
     RAII_Guards.hpp          Device/host pointer guards
     cudaSift.h               Internal aggregate header
 test/
-    main.cpp                 17-test correctness/regression suite
+    main.cpp                 18-test correctness/regression suite
     speed.cpp                Multi-resolution benchmarking harness
     img1.png, img2.png       Sample image pair
 docs/
@@ -120,7 +120,7 @@ Expected output ends with:
 
 ```
 ========================================
-Results: 17 passed, 0 failed, 17 total
+Results: 18 passed, 0 failed, 18 total
 ```
 
 For benchmarking across multiple input resolutions:
@@ -238,6 +238,7 @@ documented inline. The big picture:
 | `MatchSiftData`                                  | Brute-force descriptor matching with ratio test.   |
 | `FindHomography`                                 | RANSAC homography or similarity, with refinement.  |
 | `WarpImages` / `WarpImages_GPU`                  | Warp both images to a common canvas.               |
+| `ComputeWarpGeometry`                            | Canvas size, origin and corner positions for an H. |
 | `ExtractAndMatchSift`                            | Convenience: extract both + match.                 |
 | `ExtractAndMatchAndFindHomography`               | Convenience: extract + match + RANSAC.             |
 | `ExtractAndMatchAndFindHomography_Multi`         | Multi-attempt RANSAC with goal-based selection.    |

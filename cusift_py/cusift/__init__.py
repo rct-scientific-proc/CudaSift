@@ -23,6 +23,7 @@ from cusift.cusift import (
     MatchResult,
     MODEL_HOMOGRAPHY,
     MODEL_SIMILARITY,
+    WarpGeometry,
 )
 
 __all__ = [
@@ -37,4 +38,5 @@ __all__ = [
     "MatchResult",
     "MODEL_HOMOGRAPHY",
     "MODEL_SIMILARITY",
+    "WarpGeometry",
 ]

@@ -941,6 +941,130 @@ static bool test_estimate_vram(const Image_t& im1, const Image_t& im2)
     return pass;
 }
 
+// -- Test: ComputeWarpGeometry ---------------------------
+
+static bool test_warp_geometry(const Image_t& im1, const Image_t& im2)
+{
+    std::cout << "[TEST] ComputeWarpGeometry" << std::endl;
+
+    SiftData sd1{}, sd2{};
+    ExtractSiftOptions_t eo = default_extract_options();
+    FindHomographyOptions_t ho = default_homography_options();
+
+    ExtractSiftFromImage(&im1, &sd1, &eo);
+    ExtractSiftFromImage(&im2, &sd2, &eo);
+    MatchSiftData(&sd1, &sd2);
+
+    float H[9];
+    int nm = 0;
+    FindHomography(&sd1, H, &nm, &ho);
+    if (check_error("setup") || !homography_is_valid(H))
+    {
+        std::cout << "  [SKIP] no valid homography" << std::endl;
+        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+        return false;
+    }
+
+    const int w1 = im1.width_, h1 = im1.height_, w2 = im2.width_, h2 = im2.height_;
+    bool pass = true;
+
+    WarpGeometry_t g{};
+    ComputeWarpGeometry(H, w1, h1, w2, h2, &g);
+    pass = pass && !check_error("ComputeWarpGeometry");
+    std::cout << "  Canvas: " << g.canvas_width << "x" << g.canvas_height
+              << ", origin (" << g.origin_u << ", " << g.origin_v << ")" << std::endl;
+    for (int k = 0; k < 4; k++)
+        std::cout << "  image-2 corner " << k << " -> (" << g.corners2[k][0] << ", " << g.corners2[k][1] << ")" << std::endl;
+
+    // 1. The warp allocates exactly the canvas the geometry predicts.
+    Image_t wa = {}, wb = {};
+    WarpImages(&im1, &im2, H, &wa, &wb, false);
+    pass = pass && !check_error("WarpImages");
+    if (wa.width_ != g.canvas_width || wa.height_ != g.canvas_height)
+    {
+        std::cout << "  [FAIL] warped size " << wa.width_ << "x" << wa.height_ << " != geometry" << std::endl;
+        pass = false;
+    }
+
+    // 2. Image 1 sits at the origin shift and its corners are integers.
+    if (g.origin_u > 0 || g.origin_v > 0
+        || g.corners1[0][0] != (float)(-g.origin_u) || g.corners1[0][1] != (float)(-g.origin_v)
+        || g.corners1[2][0] != (float)(w1 - 1 - g.origin_u) || g.corners1[2][1] != (float)(h1 - 1 - g.origin_v))
+    {
+        std::cout << "  [FAIL] image-1 corners do not match the origin shift" << std::endl;
+        pass = false;
+    }
+
+    // 3. The first valid column/row of the warped image 1 is the origin shift,
+    //    which is how callers had to recover the origin before this API existed.
+    if (wa.host_img_)
+    {
+        int firstCol = -1, firstRow = -1;
+        const int rowOfImage1 = -g.origin_v;   // a canvas row that image 1 covers
+        const int colOfImage1 = -g.origin_u;   // a canvas column that image 1 covers
+        for (int x = 0; x < wa.width_ && firstCol < 0; x++)
+            if (!std::isnan(wa.host_img_[(size_t)rowOfImage1 * wa.width_ + x])) firstCol = x;
+        for (int y = 0; y < wa.height_ && firstRow < 0; y++)
+            if (!std::isnan(wa.host_img_[(size_t)y * wa.width_ + colOfImage1])) firstRow = y;
+        if (firstCol != -g.origin_u || firstRow != -g.origin_v)
+        {
+            std::cout << "  [FAIL] first valid pixel of warped image 1 at (" << firstCol << ", " << firstRow
+                      << "), expected (" << -g.origin_u << ", " << -g.origin_v << ")" << std::endl;
+            pass = false;
+        }
+    }
+
+    // 4. Round trip: each image-2 corner on the canvas, moved back to image-1
+    //    coordinates and pushed through H, must land on the matching corner of image 2.
+    const float c2[4][2] = {{0.0f, 0.0f}, {(float)(w2 - 1), 0.0f}, {(float)(w2 - 1), (float)(h2 - 1)}, {0.0f, (float)(h2 - 1)}};
+    float maxErr = 0.0f;
+    for (int k = 0; k < 4; k++)
+    {
+        const float u = g.corners2[k][0] + (float)g.origin_u;
+        const float v = g.corners2[k][1] + (float)g.origin_v;
+        const float z = H[6] * u + H[7] * v + H[8];
+        const float x = (H[0] * u + H[1] * v + H[2]) / z;
+        const float y = (H[3] * u + H[4] * v + H[5]) / z;
+        maxErr = std::max(maxErr, std::hypot(x - c2[k][0], y - c2[k][1]));
+    }
+    std::cout << "  Corner round-trip error through H: " << maxErr << " px" << std::endl;
+    if (!(maxErr < 1e-2f))
+    {
+        std::cout << "  [FAIL] round-trip error too large" << std::endl;
+        pass = false;
+    }
+
+    // 5. Degenerate inputs are reported through the error state.
+    float Hzero[9] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    WarpGeometry_t gz{};
+    ComputeWarpGeometry(Hzero, w1, h1, w2, h2, &gz);
+    if (!CusiftHadError())
+    {
+        std::cout << "  [FAIL] singular homography was not rejected" << std::endl;
+        pass = false;
+    }
+
+    // 6. A canvas beyond the 2x guard is rejected like the warp rejects it,
+    //    but the geometry is still filled so the caller can see the size.
+    float Hfar[9] = {1.0f, 0.0f, -(float)(3 * w1), 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};  // image 2 sits 3 widths to the right
+    WarpGeometry_t gf{};
+    ComputeWarpGeometry(Hfar, w1, h1, w2, h2, &gf);
+    if (!CusiftHadError() || gf.canvas_width <= 2 * std::max(w1, w2))
+    {
+        std::cout << "  [FAIL] oversized canvas not reported (had_error=" << CusiftHadError()
+                  << ", width=" << gf.canvas_width << ")" << std::endl;
+        pass = false;
+    }
+
+    std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
+
+    FreeImage(&wa);
+    FreeImage(&wb);
+    DeleteSiftData(&sd1);
+    DeleteSiftData(&sd2);
+    return pass;
+}
+
 // -- Main ------------------------------------------------
 
 int main(int argc, char* argv[])
@@ -981,6 +1105,7 @@ int main(int argc, char* argv[])
     run(test_warp_images_cpu(im1, im2));
     run(test_warp_images_gpu(im1, im2));
     run(test_warp_images_gpu_strided(im1, im2));
+    run(test_warp_geometry(im1, im2));
     run(test_save_sift_data(im1));
     run(test_extract_and_match(im1, im2));
     run(test_extract_match_homography(im1, im2));

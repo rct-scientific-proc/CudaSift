@@ -705,6 +705,94 @@ bool Invert3x3(const float *M, float *out)
     return true;
 }
 
+// ── Canvas geometry ─────────────────────────────────────
+// The one place that decides where the two images land on the common canvas.
+// Every warp entry point and the public ComputeWarpGeometry() go through
+// here, so the geometry a caller queries is bit-identical to the geometry a
+// warp uses.
+//
+// The canvas is image 1's frame. Image 2's four corners are carried through
+// inv(H) into that frame; the canvas is the integer bounding box of those
+// corners together with image 1's own rectangle, rounded outward; canvas
+// pixel (0, 0) is reference point (origin_u, origin_v).
+//
+// Fills *g before running the size guards, so a caller that catches the
+// "too large" error still sees where the corners went. Throws (via ERROR) on
+// a non-finite or singular H, on a canvas larger than twice the larger input,
+// and on a non-positive canvas.
+static void ComputeCanvasGeometry(const float *homography, int w1, int h1, int w2, int h2, WarpGeometry_t *g)
+{
+    std::memset(g, 0, sizeof(*g));
+
+    for (int i = 0; i < 9; i++)
+    {
+        if (!std::isfinite(homography[i]))
+            ERROR("Homography contains non-finite values");
+    }
+    float Hinv[9];
+    if (!Invert3x3(homography, Hinv))
+    {
+        ERROR("Homography is too close to singular to invert");
+    }
+
+    // Corner order (0,0), (w-1,0), (w-1,h-1), (0,h-1); pixel-centre convention.
+    const float c1[4][2] = {{0.0f, 0.0f}, {(float)(w1 - 1), 0.0f}, {(float)(w1 - 1), (float)(h1 - 1)}, {0.0f, (float)(h1 - 1)}};
+    const float c2[4][2] = {{0.0f, 0.0f}, {(float)(w2 - 1), 0.0f}, {(float)(w2 - 1), (float)(h2 - 1)}, {0.0f, (float)(h2 - 1)}};
+
+    // Project image 2's corners through inv(H) into image 1's frame.
+    float cx[4], cy[4];
+    for (int i = 0; i < 4; i++)
+    {
+        float x = c2[i][0], y = c2[i][1];
+        float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
+        cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
+        cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
+    }
+
+    // Bounding box of image 1's rectangle and the projected corners, rounded outward.
+    float uMin = 0.0f, uMax = (float)(w1 - 1);
+    float vMin = 0.0f, vMax = (float)(h1 - 1);
+    for (int i = 0; i < 4; i++)
+    {
+        uMin = std::min(uMin, cx[i]);
+        uMax = std::max(uMax, cx[i]);
+        vMin = std::min(vMin, cy[i]);
+        vMax = std::max(vMax, cy[i]);
+    }
+    const int u0 = (int)floorf(uMin);
+    const int u1 = (int)ceilf(uMax);
+    const int v0 = (int)floorf(vMin);
+    const int v1 = (int)ceilf(vMax);
+
+    g->origin_u = u0;
+    g->origin_v = v0;
+    g->canvas_width = u1 - u0 + 1;
+    g->canvas_height = v1 - v0 + 1;
+    for (int i = 0; i < 4; i++)
+    {
+        g->corners1[i][0] = c1[i][0] - (float)u0;
+        g->corners1[i][1] = c1[i][1] - (float)v0;
+        g->corners2[i][0] = cx[i] - (float)u0;
+        g->corners2[i][1] = cy[i] - (float)v0;
+    }
+
+    const int outW = g->canvas_width, outH = g->canvas_height;
+    const int maxW_ = 2 * std::max(w1, w2);
+    const int maxH_ = 2 * std::max(h1, h2);
+    if (outW > maxW_ || outH > maxH_)
+    {
+        std::stringstream ss;
+        ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
+        ERROR(ss.str().c_str());
+    }
+    if (outW <= 0 || outH <= 0)
+    {
+        std::stringstream ss;
+        ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
+        ERROR(ss.str().c_str());
+    }
+}
+
 // ── Bilinear sample (CPU) ───────────────────────────────
 inline float SampleBilinear(const float *img, int w, int h, float x, float y)
 {
@@ -804,68 +892,13 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
         int w2 = image2->width_, h2 = image2->height_;
 
         // ── Step 1: Compute inv(homography) and project image2 corners ──
-        float Hinv[9];
-        if (!Invert3x3(homography, Hinv))
-        {
-            ERROR("Homography is too close to singular to invert");
-        }
+        WarpGeometry_t geom;
+        ComputeCanvasGeometry(homography, w1, h1, w2, h2, &geom);
+        const int outW = geom.canvas_width;
+        const int outH = geom.canvas_height;
+        const float originU = (float)geom.origin_u;
+        const float originV = (float)geom.origin_v;
 
-        // Image2 corners in 0-based convention: (col, row, 1)
-        float corners2[4][3] = {
-            {0.0f, 0.0f, 1.0f},
-            {(float)(w2 - 1), 0.0f, 1.0f},
-            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
-            {0.0f, (float)(h2 - 1), 1.0f}};
-
-        // Project corners through inv(H) → image1's coordinate frame
-        float cx[4], cy[4];
-        for (int i = 0; i < 4; i++)
-        {
-            float x = corners2[i][0], y = corners2[i][1];
-            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-        }
-
-        // ── Step 2: Determine output canvas bounding box ────
-        float uMin = 0.0f, uMax = (float)(w1 - 1);
-        float vMin = 0.0f, vMax = (float)(h1 - 1);
-        for (int i = 0; i < 4; i++)
-        {
-            uMin = std::min(uMin, cx[i]);
-            uMax = std::max(uMax, cx[i]);
-            vMin = std::min(vMin, cy[i]);
-            vMax = std::max(vMax, cy[i]);
-        }
-
-        // Integer range (MATLAB-style: ur = min:max with integer steps)
-        int u0 = (int)floorf(uMin);
-        int u1 = (int)ceilf(uMax);
-        int v0 = (int)floorf(vMin);
-        int v1 = (int)ceilf(vMax);
-
-        int outW = u1 - u0 + 1;
-        int outH = v1 - v0 + 1;
-
-        int maxW_ = 2 * std::max(image1->width_, image2->width_);
-        int maxH_ = 2 * std::max(image1->height_, image2->height_);
-        if (outW > maxW_ || outH > maxH_)
-        {
-            std::stringstream ss;
-            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
-            ERROR(ss.str().c_str());
-        }
-
-        if (outW <= 0 || outH <= 0)
-        {
-            std::stringstream ss;
-            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
-            ERROR(ss.str().c_str());
-        }
-
-        // Origin offset: canvas pixel (0,0) corresponds to 1-based coord (u0, v0)
-        float originU = (float)u0;
-        float originV = (float)v0;
 
         // ── Step 3: Allocate output images ──────────────────
         size_t nPixels = (size_t)outW * outH;
@@ -975,64 +1008,13 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
         int w2 = image2->width_, h2 = image2->height_;
 
         // ── Step 1: Compute inv(homography) and project image2 corners ──
-        float Hinv[9];
-        if (!Invert3x3(homography, Hinv))
-        {
-            ERROR("Homography is too close to singular to invert");
-        }
+        WarpGeometry_t geom;
+        ComputeCanvasGeometry(homography, w1, h1, w2, h2, &geom);
+        const int outW = geom.canvas_width;
+        const int outH = geom.canvas_height;
+        const float originU = (float)geom.origin_u;
+        const float originV = (float)geom.origin_v;
 
-        float corners2[4][3] = {
-            {0.0f, 0.0f, 1.0f},
-            {(float)(w2 - 1), 0.0f, 1.0f},
-            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
-            {0.0f, (float)(h2 - 1), 1.0f}};
-
-        float cx[4], cy[4];
-        for (int i = 0; i < 4; i++)
-        {
-            float x = corners2[i][0], y = corners2[i][1];
-            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-        }
-
-        // ── Step 2: Determine output canvas bounding box ────
-        float uMin = 0.0f, uMax = (float)(w1 - 1);
-        float vMin = 0.0f, vMax = (float)(h1 - 1);
-        for (int i = 0; i < 4; i++)
-        {
-            uMin = std::min(uMin, cx[i]);
-            uMax = std::max(uMax, cx[i]);
-            vMin = std::min(vMin, cy[i]);
-            vMax = std::max(vMax, cy[i]);
-        }
-
-        int u0 = (int)floorf(uMin);
-        int u1 = (int)ceilf(uMax);
-        int v0 = (int)floorf(vMin);
-        int v1 = (int)ceilf(vMax);
-
-        int outW = u1 - u0 + 1;
-        int outH = v1 - v0 + 1;
-
-        int maxW_ = 2 * std::max(image1->width_, image2->width_);
-        int maxH_ = 2 * std::max(image1->height_, image2->height_);
-        if (outW > maxW_ || outH > maxH_)
-        {
-            std::stringstream ss;
-            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
-            ERROR(ss.str().c_str());
-        }
-
-        if (outW <= 0 || outH <= 0)
-        {
-            std::stringstream ss;
-            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
-            ERROR(ss.str().c_str());
-        }
-
-        float originU = (float)u0;
-        float originV = (float)v0;
 
         // ── Step 3: Allocate GPU images ─────────────────────
         DevicePtrGuard<float> d_src1Guard, d_src2Guard;
@@ -1084,6 +1066,19 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
 
         // d_src1Guard, d_src2Guard freed automatically
     }); // end cusift_api_guard for WarpImages_GPU
+}
+
+void ComputeWarpGeometry(const float *homography, int image_width1, int image_height1, int image_width2, int image_height2, WarpGeometry_t *geometry)
+{
+    cusift_api_guard([&]()
+    {
+        RequireNonNull(geometry, "geometry");
+        std::memset(geometry, 0, sizeof(*geometry));
+        RequireNonNull(homography, "homography");
+        if (image_width1 <= 0 || image_height1 <= 0 || image_width2 <= 0 || image_height2 <= 0)
+            throw CusiftError(__FILE__, __LINE__, "image dimensions must be positive");
+        ComputeCanvasGeometry(homography, image_width1, image_height1, image_width2, image_height2, geometry);
+    });
 }
 
 void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
@@ -1168,61 +1163,12 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
             homography_options->improve_thresh_);
 
         // ── Compute canvas bounding box ─────────────────────────────────────
-        float Hinv[9];
-        if (!Invert3x3(homography, Hinv))
-        {
-            ERROR("Homography is too close to singular to invert");
-        }
-
-        float corners2[4][3] = {
-            {0.0f, 0.0f, 1.0f},
-            {(float)(w2 - 1), 0.0f, 1.0f},
-            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
-            {0.0f, (float)(h2 - 1), 1.0f}};
-
-        float cx[4], cy[4];
-        for (int i = 0; i < 4; i++)
-        {
-            float x = corners2[i][0], y = corners2[i][1];
-            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-        }
-
-        float uMin = 0.0f, uMax = (float)(w1 - 1);
-        float vMin = 0.0f, vMax = (float)(h1 - 1);
-        for (int i = 0; i < 4; i++)
-        {
-            uMin = std::min(uMin, cx[i]);
-            uMax = std::max(uMax, cx[i]);
-            vMin = std::min(vMin, cy[i]);
-            vMax = std::max(vMax, cy[i]);
-        }
-
-        int u0 = (int)floorf(uMin);
-        int u1 = (int)ceilf(uMax);
-        int v0 = (int)floorf(vMin);
-        int v1 = (int)ceilf(vMax);
-
-        int outW = u1 - u0 + 1;
-        int outH = v1 - v0 + 1;
-        float originU = (float)u0;
-        float originV = (float)v0;
-
-        int maxW_ = 2 * std::max(image1->width_, image2->width_);
-        int maxH_ = 2 * std::max(image1->height_, image2->height_);
-        if (outW > maxW_ || outH > maxH_)
-        {
-            std::stringstream ss;
-            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
-            ERROR(ss.str().c_str());
-        }
-        if (outW <= 0 || outH <= 0)
-        {
-            std::stringstream ss;
-            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
-            ERROR(ss.str().c_str());
-        }
+        WarpGeometry_t geom;
+        ComputeCanvasGeometry(homography, w1, h1, w2, h2, &geom);
+        const int outW = geom.canvas_width;
+        const int outH = geom.canvas_height;
+        const float originU = (float)geom.origin_u;
+        const float originV = (float)geom.origin_v;
 
         // ── Warp on GPU — source data is already device-resident ────────────
         // Reuse the CudaImageGuard device pointers (no extra upload needed).
@@ -1361,61 +1307,12 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
             homography_options->improve_thresh_);
 
         // ── Compute canvas bounding box ─────────────────────────────────────
-        float Hinv[9];
-        if (!Invert3x3(homography, Hinv))
-        {
-            ERROR("Homography is too close to singular to invert");
-        }
-
-        float corners2[4][3] = {
-            {0.0f, 0.0f, 1.0f},
-            {(float)(w2 - 1), 0.0f, 1.0f},
-            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
-            {0.0f, (float)(h2 - 1), 1.0f}};
-
-        float cx[4], cy[4];
-        for (int i = 0; i < 4; i++)
-        {
-            float x = corners2[i][0], y = corners2[i][1];
-            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-        }
-
-        float uMin = 0.0f, uMax = (float)(w1 - 1);
-        float vMin = 0.0f, vMax = (float)(h1 - 1);
-        for (int i = 0; i < 4; i++)
-        {
-            uMin = std::min(uMin, cx[i]);
-            uMax = std::max(uMax, cx[i]);
-            vMin = std::min(vMin, cy[i]);
-            vMax = std::max(vMax, cy[i]);
-        }
-
-        int u0 = (int)floorf(uMin);
-        int u1 = (int)ceilf(uMax);
-        int v0 = (int)floorf(vMin);
-        int v1 = (int)ceilf(vMax);
-
-        int outW = u1 - u0 + 1;
-        int outH = v1 - v0 + 1;
-        float originU = (float)u0;
-        float originV = (float)v0;
-
-        int maxW_ = 2 * std::max(image1->width_, image2->width_);
-        int maxH_ = 2 * std::max(image1->height_, image2->height_);
-        if (outW > maxW_ || outH > maxH_)
-        {
-            std::stringstream ss;
-            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
-            ERROR(ss.str().c_str());
-        }
-        if (outW <= 0 || outH <= 0)
-        {
-            std::stringstream ss;
-            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
-            ERROR(ss.str().c_str());
-        }
+        WarpGeometry_t geom;
+        ComputeCanvasGeometry(homography, w1, h1, w2, h2, &geom);
+        const int outW = geom.canvas_width;
+        const int outH = geom.canvas_height;
+        const float originU = (float)geom.origin_u;
+        const float originV = (float)geom.origin_v;
 
         // ── Warp on GPU — source data is already device-resident ────────────
         float *d_src1 = cuda_image1.get()->d_data;
@@ -1590,61 +1487,12 @@ void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const
         std::memcpy(homography, bestH, 9 * sizeof(float));
         *num_matches = bestInliers;
 
-        float Hinv[9];
-        if (!Invert3x3(homography, Hinv))
-        {
-            ERROR("Homography is too close to singular to invert");
-        }
-
-        float corners2[4][3] = {
-            {0.0f, 0.0f, 1.0f},
-            {(float)(w2 - 1), 0.0f, 1.0f},
-            {(float)(w2 - 1), (float)(h2 - 1), 1.0f},
-            {0.0f, (float)(h2 - 1), 1.0f}};
-
-        float cx[4], cy[4];
-        for (int i = 0; i < 4; i++)
-        {
-            float x = corners2[i][0], y = corners2[i][1];
-            float z = Hinv[6] * x + Hinv[7] * y + Hinv[8];
-            cx[i] = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / z;
-            cy[i] = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / z;
-        }
-
-        float uMin = 0.0f, uMax = (float)(w1 - 1);
-        float vMin = 0.0f, vMax = (float)(h1 - 1);
-        for (int i = 0; i < 4; i++)
-        {
-            uMin = std::min(uMin, cx[i]);
-            uMax = std::max(uMax, cx[i]);
-            vMin = std::min(vMin, cy[i]);
-            vMax = std::max(vMax, cy[i]);
-        }
-
-        int u0 = (int)floorf(uMin);
-        int u1 = (int)ceilf(uMax);
-        int v0 = (int)floorf(vMin);
-        int v1 = (int)ceilf(vMax);
-
-        int outW = u1 - u0 + 1;
-        int outH = v1 - v0 + 1;
-        float originU = (float)u0;
-        float originV = (float)v0;
-
-        int maxW_ = 2 * std::max(image1->width_, image2->width_);
-        int maxH_ = 2 * std::max(image1->height_, image2->height_);
-        if (outW > maxW_ || outH > maxH_)
-        {
-            std::stringstream ss;
-            ss << "Warping: warped image too large (" << outW << "x" << outH << "), not attempting warp";
-            ERROR(ss.str().c_str());
-        }
-        if (outW <= 0 || outH <= 0)
-        {
-            std::stringstream ss;
-            ss << "Warping: invalid output image size (" << outW << "x" << outH << ")";
-            ERROR(ss.str().c_str());
-        }
+        WarpGeometry_t geom;
+        ComputeCanvasGeometry(homography, w1, h1, w2, h2, &geom);
+        const int outW = geom.canvas_width;
+        const int outH = geom.canvas_height;
+        const float originU = (float)geom.origin_u;
+        const float originV = (float)geom.origin_v;
 
         float *d_src1 = cuda_image1.get()->d_data;
         float *d_src2 = cuda_image2.get()->d_data;

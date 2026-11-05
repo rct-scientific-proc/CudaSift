@@ -38,6 +38,7 @@
  * - FindHomography()
  * - WarpImages()
  * - WarpImages_GPU()
+ * - ComputeWarpGeometry()
  * - DeleteSiftData()
  * - FreeImage()
  * - CusiftGetLastErrorString()
@@ -203,6 +204,37 @@ extern "C"
         int height_;            /**< Image height in pixels. */
         size_t stride_;         /**< Stride in bytes between rows (for GPU warping). */
     } ImageStrided_t;
+
+    /**
+     * @brief Where the two input images land on the common canvas produced by
+     *        the warp functions.
+     *
+     * The canvas is image 1's coordinate frame, extended so that it also holds
+     * image 2 after transformation through the inverse homography. Canvas pixel
+     * (0, 0) is image-1 coordinate (origin_u, origin_v); both are integers and
+     * never positive, because image 1 is always kept whole. Every warp entry
+     * point sizes its output with exactly this geometry, so the values here are
+     * bit-identical to what WarpImages() / WarpImages_GPU() and the fused
+     * pipelines use internally.
+     *
+     * Corners are listed in the order (0, 0), (w-1, 0), (w-1, h-1), (0, h-1) of
+     * the source image, in canvas pixel coordinates, using the library's
+     * pixel-centre convention (pixel (i, j) sits at point (i, j)). Image 1's
+     * corners are therefore integers: (-origin_u, -origin_v) and so on. Image 2's
+     * corners are the sub-pixel positions of its transformed corners. Note that
+     * the warp samples the half-open range [0, w-1) x [0, h-1) of each source,
+     * so the last column and row described by these corners hold NaN in the
+     * warped output.
+     */
+    typedef struct
+    {
+        int origin_u;           /**< Image-1 x coordinate of canvas pixel (0, 0); <= 0. */
+        int origin_v;           /**< Image-1 y coordinate of canvas pixel (0, 0); <= 0. */
+        int canvas_width;       /**< Width of the warped images (outW). */
+        int canvas_height;      /**< Height of the warped images (outH). */
+        float corners1[4][2];   /**< Image-1 corners on the canvas, (x, y) each. */
+        float corners2[4][2];   /**< Image-2 corners on the canvas, (x, y) each. */
+    } WarpGeometry_t;
     
 
     /**
@@ -402,6 +434,36 @@ extern "C"
     CUSIFT_API void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *homography, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2);
 
     /**
+     * @brief Compute, without warping anything, the canvas that WarpImages() /
+     *        WarpImages_GPU() and the fused pipelines would produce for a given
+     *        homography: its size, its origin, and where the corners of both
+     *        input images land on it.
+     *
+     * This is a host-only, constant-time call (one 3x3 inverse and four point
+     * projections). It runs the same code the warp functions run internally, so
+     * the result matches a subsequent warp exactly. Typical uses: a pre-flight
+     * check of the output size before allocating, computing the exact VRAM
+     * needed for a warp instead of the 2x bound assumed by
+     * EstimateVramWarpImages(), and locating the overlap region, seams or
+     * crop rectangles after warping.
+     *
+     * Error behaviour mirrors the warp functions: a non-finite or singular
+     * homography, non-positive image dimensions, or a canvas larger than twice
+     * the larger input in either axis sets the error state (see
+     * CusiftHadError()). For the canvas-size errors the structure is still
+     * filled with the computed geometry so the caller can see what was
+     * rejected; for the other errors it is zeroed.
+     *
+     * @param homography     Row-major 3x3 homography mapping image-1 to image-2 coordinates.
+     * @param image_width1   Width of image 1 in pixels.
+     * @param image_height1  Height of image 1 in pixels.
+     * @param image_width2   Width of image 2 in pixels.
+     * @param image_height2  Height of image 2 in pixels.
+     * @param geometry       Receives the canvas size, origin and corner positions.
+     */
+    CUSIFT_API void ComputeWarpGeometry(const float *homography, int image_width1, int image_height1, int image_width2, int image_height2, WarpGeometry_t *geometry);
+
+    /**
      * @brief Delete a SiftData structure and free all associated resources. After calling this function, the SiftData pointer should not be used again unless it is re-initialized. The caller is responsible for ensuring that the SiftData structure was properly initialized and contains valid data before calling this function.
      *
      * @param sift_data Pointer to the SiftData structure to be deleted.
@@ -582,7 +644,9 @@ extern "C"
      *
      * Because the output canvas size depends on the homography (which is
      * unknown before extraction), this function assumes worst-case output
-     * dimensions of 2x the larger input dimension in each axis.
+     * dimensions of 2x the larger input dimension in each axis. Once the
+     * homography is known, ComputeWarpGeometry() gives the exact canvas size
+     * and therefore the exact output allocation.
      *
      * @param image_width1   Width of the first input image.
      * @param image_height1  Height of the first input image.
