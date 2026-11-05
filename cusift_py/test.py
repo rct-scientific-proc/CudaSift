@@ -10,8 +10,9 @@ from PIL import Image
 from cusift import (
     CuSift,
     CuSiftError,
-    HOMOGRAPHY_GOAL_MAX_INLIERS,
-    HOMOGRAPHY_GOAL_MIN_EYE_DIFF,
+    GOAL_MAX_INLIERS,
+    GOAL_MIN_IDENTITY_DISTANCE,
+    HomographyOptions,
 )
 
 
@@ -91,9 +92,9 @@ def _ensure_dir(path: Path) -> Path:
 
 def _goal_from_cli(goal: str) -> int:
     if goal == "max_inliers":
-        return HOMOGRAPHY_GOAL_MAX_INLIERS
+        return GOAL_MAX_INLIERS
     if goal == "min_eye_diff":
-        return HOMOGRAPHY_GOAL_MIN_EYE_DIFF
+        return GOAL_MIN_IDENTITY_DISTANCE
     raise ValueError(f"Unknown goal: {goal}")
 
 
@@ -129,7 +130,7 @@ def main() -> None:
     parser.add_argument(
         "--cpu-warp",
         action="store_true",
-        help="Use CPU implementation for warp_images instead of GPU",
+        help="Use CPU implementation for warp instead of GPU",
     )
     args = parser.parse_args()
 
@@ -148,7 +149,7 @@ def main() -> None:
     sift = CuSift(dll_path=args.dll)
 
     try:
-        _print_stage("extract + match + find_homography + warp_images")
+        _print_stage("extract + match + estimate_homography + warp")
         op1 = _ensure_dir(out_root / "extract_match_find_homography_warp")
         kp1 = sift.extract(img1)
         kp2 = sift.extract(img2)
@@ -159,11 +160,11 @@ def main() -> None:
             matches = sift.match(kp1, kp2)
             _save_matches(op1, matches)
 
-            H, n_inliers = sift.find_homography(kp1)
+            H, n_inliers = sift.estimate_homography(kp1)
             _save_homography(op1, H)
             print(f"Homography:\n{H}\nInliers: {n_inliers}")
 
-            warped1, warped2 = sift.warp_images(img1, img2, H, use_gpu=not args.cpu_warp)
+            warped1, warped2 = sift.warp(img1, img2, H, use_gpu=not args.cpu_warp)
             _save_image(op1 / "warped_i1.png", warped1)
             _save_image(op1 / "warped_i2.png", warped2)
 
@@ -184,9 +185,9 @@ def main() -> None:
             kp1.free()
             kp2.free()
 
-        _print_stage("extract_and_match_and_find_homography")
-        op3 = _ensure_dir(out_root / "extract_and_match_and_find_homography")
-        kp1, kp2, matches, H, n_inliers = sift.extract_and_match_and_find_homography(img1, img2)
+        _print_stage("align")
+        op3 = _ensure_dir(out_root / "align")
+        kp1, kp2, matches, H, n_inliers = sift.align(img1, img2)
         try:
             _save_keypoints_and_descriptors(op3, kp1, "i1")
             _save_keypoints_and_descriptors(op3, kp2, "i2")
@@ -197,13 +198,12 @@ def main() -> None:
             kp1.free()
             kp2.free()
 
-        _print_stage("extract_and_match_and_find_homography_multi")
-        op4 = _ensure_dir(out_root / "extract_and_match_and_find_homography_multi")
-        kp1, kp2, matches, H, n_inliers = sift.extract_and_match_and_find_homography_multi(
+        _print_stage("align (several attempts)")
+        op4 = _ensure_dir(out_root / "align_attempts")
+        kp1, kp2, matches, H, n_inliers = sift.align(
             img1,
             img2,
-            num_homography_attempts=args.num_homography_attempts,
-            homography_goal=goal,
+            homography_options=HomographyOptions(attempts=args.num_homography_attempts, goal=goal),
         )
         print(f"Homography:\n{H}\nInliers: {n_inliers}")
         try:
@@ -216,10 +216,10 @@ def main() -> None:
             kp1.free()
             kp2.free()
 
-        _print_stage("extract_and_match_and_find_homography_and_warp")
-        op5 = _ensure_dir(out_root / "extract_and_match_and_find_homography_and_warp")
+        _print_stage("align_and_warp")
+        op5 = _ensure_dir(out_root / "align_and_warp")
         kp1, kp2, matches, H, n_inliers, warped1, warped2 = (
-            sift.extract_and_match_and_find_homography_and_warp(img1, img2)
+            sift.align_and_warp(img1, img2)
         )
         print(f"Homography:\n{H}\nInliers: {n_inliers}")
         try:
@@ -234,14 +234,13 @@ def main() -> None:
             kp1.free()
             kp2.free()
 
-        _print_stage("extract_and_match_and_find_homography_multi_and_warp")
-        op6 = _ensure_dir(out_root / "extract_and_match_and_find_homography_multi_and_warp")
+        _print_stage("align_and_warp (several attempts)")
+        op6 = _ensure_dir(out_root / "align_and_warp_attempts")
         kp1, kp2, matches, H, n_inliers, warped1, warped2 = (
-            sift.extract_and_match_and_find_homography_multi_and_warp(
+            sift.align_and_warp(
                 img1,
                 img2,
-                num_homography_attempts=args.num_homography_attempts,
-                homography_goal=goal,
+                homography_options=HomographyOptions(attempts=args.num_homography_attempts, goal=goal),
             )
         )
         print(f"Homography:\n{H}\nInliers: {n_inliers}")

@@ -210,7 +210,7 @@ static int solve_cholesky_8x8(float M[8][8], float b[8])
 int ImproveHomography(SiftData *data, float *homography, int numLoops,
                       float minScore, float maxAmbiguity, float thresh)
 {
-    if (data->h_data == NULL)
+    if (data->host == NULL)
         return 0;
 
 #if CUSIFT_HAVE_AVX2
@@ -220,9 +220,9 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
         return 0;
 #endif
 
-    SiftPoint *mpts = data->h_data;
+    SiftPoint *mpts = data->host;
     float limit = thresh * thresh;
-    int numPts = data->numPts;
+    int numPts = data->count;
 
     float A[8]; /* current homography parameters (h9 = 1) */
     float inv_h8 = 1.0f / homography[8];
@@ -258,10 +258,10 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
             if (pt->score < minScore || pt->ambiguity > maxAmbiguity)
                 continue;
 
-            float xp = pt->xpos;
-            float yp = pt->ypos;
-            float mx = pt->match_xpos;
-            float my = pt->match_ypos;
+            float xp = pt->x;
+            float yp = pt->y;
+            float mx = pt->match_x;
+            float my = pt->match_y;
 
             float den = A[6] * xp + A[7] * yp + 1.0f;
             float inv_den = 1.0f / den;
@@ -310,10 +310,10 @@ int ImproveHomography(SiftData *data, float *homography, int numLoops,
     for (int i = 0; i < numPts; i++)
     {
         SiftPoint *pt = &mpts[i];
-        float den = A[6] * pt->xpos + A[7] * pt->ypos + 1.0f;
+        float den = A[6] * pt->x + A[7] * pt->y + 1.0f;
         float inv_den = 1.0f / den;
-        float dx = (A[0] * pt->xpos + A[1] * pt->ypos + A[2]) * inv_den - pt->match_xpos;
-        float dy = (A[3] * pt->xpos + A[4] * pt->ypos + A[5]) * inv_den - pt->match_ypos;
+        float dx = (A[0] * pt->x + A[1] * pt->y + A[2]) * inv_den - pt->match_x;
+        float dy = (A[3] * pt->x + A[4] * pt->y + A[5]) * inv_den - pt->match_y;
         float err = dx * dx + dy * dy;
         if (err < limit)
             numfit++;

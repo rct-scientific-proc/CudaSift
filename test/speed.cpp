@@ -69,44 +69,44 @@ static void upscale(std::vector<float>& upImage, int& upwidth, int& upheight, co
 
 static bool check_error(const char* label)
 {
-    if (CusiftHadError())
+    cusift_error_record err;
+    if (cusift_last_error(&err))
     {
-        char err[256], file[256];
-        int line;
-        CusiftGetLastErrorString(&line, file, sizeof(file), err, sizeof(err));
-        std::cerr << "  ERROR in " << label << ": " << err << std::endl;
+        std::cerr << "  ERROR in " << label << ": " << err.function << ": " << err.message << std::endl;
         return true;
     }
     return false;
 }
 
-static ExtractSiftOptions_t default_extract_options()
+static cusift_extract_options default_extract_options()
 {
-    ExtractSiftOptions_t opts;
-    opts.thresh_ = 2.0f;
-    opts.lowest_scale_ = 0.0f;
-    opts.highest_scale_ = std::numeric_limits<float>::infinity();
-    opts.edge_thresh_ = 10.0f;
-    opts.init_blur_ = 1.0f;
-    opts.max_keypoints_ = 65536;
-    opts.num_octaves_ = 7;
-    opts.scale_suppression_radius_ = 0.0f;
+    cusift_extract_options opts;
+    opts.contrast_threshold = 2.0f;
+    opts.lowest_scale = 0.0f;
+    opts.highest_scale = std::numeric_limits<float>::infinity();
+    opts.edge_threshold = 10.0f;
+    opts.initial_blur = 1.0f;
+    opts.max_keypoints = 65536;
+    opts.num_octaves = 7;
+    opts.scale_suppression_radius = 0.0f;
     return opts;
 }
 
-static FindHomographyOptions_t default_homography_options()
+static cusift_homography_options default_homography_options()
 {
-    FindHomographyOptions_t opts;
-    opts.num_loops_ = 100000;
-    opts.min_score_ = 0.0f;
-    opts.max_ambiguity_ = 1.0f;
-    opts.thresh_ = 3.0f;
-    opts.improve_num_loops_ = 5;
-    opts.improve_min_score_ = 0.0f;
-    opts.improve_max_ambiguity_ = 1.0f;
-    opts.improve_thresh_ = 2.0f;
-    opts.seed_ = 42;
-    opts.model_type_ = CUSIFT_MODEL_HOMOGRAPHY;
+    cusift_homography_options opts;
+    opts.ransac_iterations = 100000;
+    opts.min_score = 0.0f;
+    opts.max_ambiguity = 1.0f;
+    opts.inlier_threshold = 3.0f;
+    opts.refine_iterations = 5;
+    opts.refine_min_score = 0.0f;
+    opts.refine_max_ambiguity = 1.0f;
+    opts.refine_inlier_threshold = 2.0f;
+    opts.seed = 42;
+    opts.model = CUSIFT_MODEL_HOMOGRAPHY;
+    opts.attempts = 1;
+    opts.goal = CUSIFT_GOAL_MAX_INLIERS;
     return opts;
 }
 
@@ -188,91 +188,91 @@ struct BenchResult
     bool ok;
 };
 
-static BenchResult benchmark(const char* label, const Image_t& im1, const Image_t& im2, int model_type = CUSIFT_MODEL_HOMOGRAPHY)
+static BenchResult benchmark(const char* label, const cusift_image& im1, const cusift_image& im2, int model_type = CUSIFT_MODEL_HOMOGRAPHY)
 {
     using Clock = std::chrono::high_resolution_clock;
 
     BenchResult r{};
     r.label = label;
     r.model_type = model_type;
-    r.w1 = im1.width_;  r.h1 = im1.height_;
-    r.w2 = im2.width_;  r.h2 = im2.height_;
+    r.w1 = im1.width;  r.h1 = im1.height;
+    r.w2 = im2.width;  r.h2 = im2.height;
     r.ok = true;
 
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
-    ho.model_type_ = model_type;
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
+    ho.model = model_type;
 
     // -- VRAM estimates (no GPU calls) -------------------
-    r.vram_extract    = EstimateVramExtractSift(im1.width_, im1.height_, &eo);
-    r.vram_match      = EstimateVramMatchSift(eo.max_keypoints_, eo.max_keypoints_);
-    r.vram_homography = EstimateVramFindHomography(eo.max_keypoints_, &ho);
-    r.vram_warp       = EstimateVramWarpImages(im1.width_, im1.height_, im2.width_, im2.height_);
-    r.vram_full       = EstimateVramFullPipeline(im1.width_, im1.height_, im2.width_, im2.height_, &eo, &ho);
+    r.vram_extract    = cusift_memory_extract(im1.width, im1.height, &eo);
+    r.vram_match      = cusift_memory_match(eo.max_keypoints, eo.max_keypoints);
+    r.vram_homography = cusift_memory_homography(eo.max_keypoints, &ho);
+    r.vram_warp       = cusift_memory_warp(im1.width, im1.height, im2.width, im2.height);
+    r.vram_full       = cusift_memory_pipeline(im1.width, im1.height, im2.width, im2.height, &eo, &ho);
 
-    // -- ExtractSiftFromImage ----------------------------
+    // -- cusift_extract ----------------------------
     {
-        SiftData sd1{}, sd2{};
+        cusift_keypoints sd1{}, sd2{};
         auto t0 = Clock::now();
-        ExtractSiftFromImage(&im1, &sd1, &eo);
-        ExtractSiftFromImage(&im2, &sd2, &eo);
+        cusift_extract(&im1, &sd1, &eo);
+        cusift_extract(&im2, &sd2, &eo);
         auto t1 = Clock::now();
         r.extract_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        r.keypoints1 = sd1.numPts;
-        r.keypoints2 = sd2.numPts;
-        if (check_error("ExtractSiftFromImage")) r.ok = false;
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        r.keypoints1 = sd1.count;
+        r.keypoints2 = sd2.count;
+        if (check_error("cusift_extract")) r.ok = false;
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
-    // -- MatchSiftData -----------------------------------
+    // -- cusift_match -----------------------------------
     {
-        SiftData sd1{}, sd2{};
-        ExtractSiftFromImage(&im1, &sd1, &eo);
-        ExtractSiftFromImage(&im2, &sd2, &eo);
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract(&im1, &sd1, &eo);
+        cusift_extract(&im2, &sd2, &eo);
 
         auto t0 = Clock::now();
-        MatchSiftData(&sd1, &sd2);
+        cusift_match(&sd1, &sd2);
         auto t1 = Clock::now();
         r.match_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         int m = 0;
-        for (int i = 0; i < sd1.numPts; i++)
-            if (sd1.h_data[i].match >= 0) m++;
+        for (int i = 0; i < sd1.count; i++)
+            if (sd1.host[i].match >= 0) m++;
         r.matched = m;
-        if (check_error("MatchSiftData")) r.ok = false;
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        if (check_error("cusift_match")) r.ok = false;
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
-    // -- FindHomography ----------------------------------
+    // -- cusift_estimate_homography ----------------------------------
     {
-        SiftData sd1{}, sd2{};
-        ExtractSiftFromImage(&im1, &sd1, &eo);
-        ExtractSiftFromImage(&im2, &sd2, &eo);
-        MatchSiftData(&sd1, &sd2);
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract(&im1, &sd1, &eo);
+        cusift_extract(&im2, &sd2, &eo);
+        cusift_match(&sd1, &sd2);
 
         float H[9]{};
         int nm = 0;
         auto t0 = Clock::now();
-        FindHomography(&sd1, H, &nm, &ho);
+        cusift_estimate_homography(&sd1, H, &nm, &ho);
         auto t1 = Clock::now();
         r.homography_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         r.inliers = nm;
-        if (check_error("FindHomography")) r.ok = false;
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        if (check_error("cusift_estimate_homography")) r.ok = false;
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
-    // -- WarpImages (GPU path) ---------------------------
+    // -- cusift_warp (GPU path) ---------------------------
     {
-        SiftData sd1{}, sd2{};
-        ExtractSiftFromImage(&im1, &sd1, &eo);
-        ExtractSiftFromImage(&im2, &sd2, &eo);
-        MatchSiftData(&sd1, &sd2);
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract(&im1, &sd1, &eo);
+        cusift_extract(&im2, &sd2, &eo);
+        cusift_match(&sd1, &sd2);
         float H[9]{};
         int nm = 0;
-        FindHomography(&sd1, H, &nm, &ho);
+        cusift_estimate_homography(&sd1, H, &nm, &ho);
 
         bool valid = nm > 0;
         for (int i = 0; i < 9 && valid; i++)
@@ -280,75 +280,79 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
 
         if (valid)
         {
-            Image_t w1{}, w2{};
+            cusift_image w1{}, w2{};
             auto t0 = Clock::now();
-            WarpImages(&im1, &im2, H, &w1, &w2, true);
+            cusift_warp(&im1, &im2, H, &w1, &w2, true);
             auto t1 = Clock::now();
             r.warp_gpu_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            r.warp_w = w1.width_;
-            r.warp_h = w1.height_;
-            if (check_error("WarpImages")) r.ok = false;
-            FreeImage(&w1);
-            FreeImage(&w2);
+            r.warp_w = w1.width;
+            r.warp_h = w1.height;
+            if (check_error("cusift_warp")) r.ok = false;
+            cusift_image_free(&w1);
+            cusift_image_free(&w2);
         }
 
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     // -- Full pipeline (convenience function) ------------
     {
-        SiftData sd1{}, sd2{};
+        cusift_keypoints sd1{}, sd2{};
         float H[9]{};
         int nm = 0;
-        Image_t w1{}, w2{};
+        cusift_image w1{}, w2{};
 
         auto t0 = Clock::now();
-        ExtractAndMatchAndFindHomographyAndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho, &w1, &w2);
+        cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho, H, &nm, &w1, &w2);
         auto t1 = Clock::now();
         r.full_pipeline_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         if (check_error("FullPipeline")) r.ok = false;
-        FreeImage(&w1);
-        FreeImage(&w2);
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_image_free(&w1);
+        cusift_image_free(&w2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     // -- Full pipeline (multi-attempt convenience function) -
     {
-        SiftData sd1{}, sd2{};
+        cusift_keypoints sd1{}, sd2{};
         float H[9]{};
         int nm = 0;
-        Image_t w1{}, w2{};
+        cusift_image w1{}, w2{};
 
         auto t0 = Clock::now();
-        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                                      &w1, &w2, 5, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = 5;
+        ho_k.goal = CUSIFT_GOAL_MAX_INLIERS;
+        cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm, &w1, &w2);
         auto t1 = Clock::now();
         r.full_pipeline_multi_warp_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         r.multi_warp_inliers = nm;
-        r.multi_warp_w = w1.width_;
-        r.multi_warp_h = w1.height_;
+        r.multi_warp_w = w1.width;
+        r.multi_warp_h = w1.height;
         if (check_error("FullPipelineMultiWarp")) r.ok = false;
-        FreeImage(&w1);
-        FreeImage(&w2);
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_image_free(&w1);
+        cusift_image_free(&w2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     // -- Multi-attempt homography (5 attempts, both goals) --
     {
         for (int goal = 0; goal <= 1; goal++)
         {
-            const char* goal_name = (goal == CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS)
+            const char* goal_name = (goal == CUSIFT_GOAL_MAX_INLIERS)
                                     ? "Multi(MAX_INL)" : "Multi(MIN_EYE)";
-            SiftData sd1{}, sd2{};
+            cusift_keypoints sd1{}, sd2{};
             float H[9]{};
             int nm = 0;
 
             auto t0 = Clock::now();
-            ExtractAndMatchAndFindHomography_Multi(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                                  5, goal);
+            cusift_homography_options ho_k = ho;
+            ho_k.attempts = 5;
+            ho_k.goal = goal;
+            cusift_align(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm);
             auto t1 = Clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -358,8 +362,8 @@ static BenchResult benchmark(const char* label, const Image_t& im1, const Image_
                 std::cout << "    " << goal_name << ": " << fmt_ms(ms)
                           << ", inliers=" << nm << std::endl;
 
-            DeleteSiftData(&sd1);
-            DeleteSiftData(&sd2);
+            cusift_keypoints_free(&sd1);
+            cusift_keypoints_free(&sd2);
         }
     }
 
@@ -664,8 +668,8 @@ int main(int argc, char* argv[])
     std::cout << "Image 2: " << image2_path << " (" << width2 << "x" << height2 << ")" << std::endl;
     std::cout << std::endl;
 
-    InitializeCudaSift();
-    if (check_error("InitializeCudaSift")) return 1;
+    cusift_init();
+    if (check_error("cusift_init")) return 1;
 
     // Prepare upscaled variants
     std::vector<float> up1_2x, up2_2x;
@@ -683,18 +687,18 @@ int main(int argc, char* argv[])
     upscale(up1_8x, uw1_8, uh1_8, up1_4x, uw1_4, uh1_4, 2.0f);
     upscale(up2_8x, uw2_8, uh2_8, up2_4x, uw2_4, uh2_4, 2.0f);
 
-    Image_t im1   = { image1.data(),  width1, height1 };
-    Image_t im2   = { image2.data(),  width2, height2 };
-    Image_t im1_2 = { up1_2x.data(),  uw1_2,  uh1_2 };
-    Image_t im2_2 = { up2_2x.data(),  uw2_2,  uh2_2 };
-    Image_t im1_4 = { up1_4x.data(),  uw1_4,  uh1_4 };
-    Image_t im2_4 = { up2_4x.data(),  uw2_4,  uh2_4 };
-    Image_t im1_8 = { up1_8x.data(),  uw1_8,  uh1_8 };
-    Image_t im2_8 = { up2_8x.data(),  uw2_8,  uh2_8 };
+    cusift_image im1   = { image1.data(),  width1, height1 };
+    cusift_image im2   = { image2.data(),  width2, height2 };
+    cusift_image im1_2 = { up1_2x.data(),  uw1_2,  uh1_2 };
+    cusift_image im2_2 = { up2_2x.data(),  uw2_2,  uh2_2 };
+    cusift_image im1_4 = { up1_4x.data(),  uw1_4,  uh1_4 };
+    cusift_image im2_4 = { up2_4x.data(),  uw2_4,  uh2_4 };
+    cusift_image im1_8 = { up1_8x.data(),  uw1_8,  uh1_8 };
+    cusift_image im2_8 = { up2_8x.data(),  uw2_8,  uh2_8 };
 
     std::cout << "Running benchmarks..." << std::endl;
 
-    struct ScaleEntry { const char* label; const Image_t* a; const Image_t* b; };
+    struct ScaleEntry { const char* label; const cusift_image* a; const cusift_image* b; };
     ScaleEntry scales[] = {
         { "1x (original)", &im1,   &im2 },
         { "2x upscale",   &im1_2, &im2_2 },

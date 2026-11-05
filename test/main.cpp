@@ -34,44 +34,51 @@ static int load_image_to_grayscale_float(const char* filename, std::vector<float
 
 static bool check_error(const char* test_name)
 {
-    if (CusiftHadError())
+    cusift_error_record err;
+    if (cusift_last_error(&err))
     {
-        char error_str[256], filename[256];
-        int line_number;
-        CusiftGetLastErrorString(&line_number, filename, sizeof(filename), error_str, sizeof(error_str));
-        std::cerr << "  [FAIL] " << test_name << ": " << error_str << std::endl;
+        std::cerr << "  [FAIL] " << test_name << ": " << err.function << ": " << err.message << std::endl;
         return true;
     }
     return false;
 }
 
-static ExtractSiftOptions_t default_extract_options()
+// Message of the last error, or "" when the last call succeeded.
+static std::string last_error_message()
 {
-    ExtractSiftOptions_t opts;
-    opts.thresh_ = 2.0f;
-    opts.lowest_scale_ = 0.0f;
-    opts.highest_scale_ = std::numeric_limits<float>::infinity();
-    opts.edge_thresh_ = 10.0f;
-    opts.init_blur_ = 1.0f;
-    opts.max_keypoints_ = 10000;
-    opts.num_octaves_ = 5;
-    opts.scale_suppression_radius_ = 0.0f;
+    cusift_error_record err;
+    return cusift_last_error(&err) ? std::string(err.message) : std::string();
+}
+
+static cusift_extract_options default_extract_options()
+{
+    cusift_extract_options opts;
+    opts.contrast_threshold = 2.0f;
+    opts.lowest_scale = 0.0f;
+    opts.highest_scale = std::numeric_limits<float>::infinity();
+    opts.edge_threshold = 10.0f;
+    opts.initial_blur = 1.0f;
+    opts.max_keypoints = 10000;
+    opts.num_octaves = 5;
+    opts.scale_suppression_radius = 0.0f;
     return opts;
 }
 
-static FindHomographyOptions_t default_homography_options()
+static cusift_homography_options default_homography_options()
 {
-    FindHomographyOptions_t opts;
-    opts.num_loops_ = 10000;
-    opts.min_score_ = 0.0f;
-    opts.max_ambiguity_ = 1.0f;
-    opts.thresh_ = 3.0f;
-    opts.improve_num_loops_ = 5;
-    opts.improve_min_score_ = 0.0f;
-    opts.improve_max_ambiguity_ = 1.0f;
-    opts.improve_thresh_ = 2.0f;
-    opts.seed_ = 42;
-    opts.model_type_ = CUSIFT_MODEL_HOMOGRAPHY;
+    cusift_homography_options opts;
+    opts.ransac_iterations = 10000;
+    opts.min_score = 0.0f;
+    opts.max_ambiguity = 1.0f;
+    opts.inlier_threshold = 3.0f;
+    opts.refine_iterations = 5;
+    opts.refine_min_score = 0.0f;
+    opts.refine_max_ambiguity = 1.0f;
+    opts.refine_inlier_threshold = 2.0f;
+    opts.seed = 42;
+    opts.model = CUSIFT_MODEL_HOMOGRAPHY;
+    opts.attempts = 1;
+    opts.goal = CUSIFT_GOAL_MAX_INLIERS;
     return opts;
 }
 
@@ -88,82 +95,82 @@ static bool homography_is_valid(const float* H)
     return true;
 }
 
-// -- Test: ExtractSiftFromImage --------------------------
+// -- Test: cusift_extract --------------------------
 
-static bool test_extract(const Image_t& im1, const Image_t& im2)
+static bool test_extract(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractSiftFromImage" << std::endl;
+    std::cout << "[TEST] cusift_extract" << std::endl;
 
-    SiftData sift_data1{}, sift_data2{};
-    ExtractSiftOptions_t options = default_extract_options();
+    cusift_keypoints sift_data1{}, sift_data2{};
+    cusift_extract_options options = default_extract_options();
 
-    ExtractSiftFromImage(&im1, &sift_data1, &options);
-    if (check_error("ExtractSiftFromImage (image1)")) return false;
+    cusift_extract(&im1, &sift_data1, &options);
+    if (check_error("cusift_extract (image1)")) return false;
 
-    ExtractSiftFromImage(&im2, &sift_data2, &options);
-    if (check_error("ExtractSiftFromImage (image2)")) return false;
+    cusift_extract(&im2, &sift_data2, &options);
+    if (check_error("cusift_extract (image2)")) return false;
 
-    std::cout << "  Image 1: " << sift_data1.numPts << " keypoints" << std::endl;
-    std::cout << "  Image 2: " << sift_data2.numPts << " keypoints" << std::endl;
+    std::cout << "  Image 1: " << sift_data1.count << " keypoints" << std::endl;
+    std::cout << "  Image 2: " << sift_data2.count << " keypoints" << std::endl;
 
-    bool pass = sift_data1.numPts > 0 && sift_data2.numPts > 0;
+    bool pass = sift_data1.count > 0 && sift_data2.count > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sift_data1);
-    DeleteSiftData(&sift_data2);
+    cusift_keypoints_free(&sift_data1);
+    cusift_keypoints_free(&sift_data2);
     return pass;
 }
 
-// -- Test: MatchSiftData ---------------------------------
+// -- Test: cusift_match ---------------------------------
 
-static bool test_match(const Image_t& im1, const Image_t& im2)
+static bool test_match(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] MatchSiftData" << std::endl;
+    std::cout << "[TEST] cusift_match" << std::endl;
 
-    SiftData sift_data1{}, sift_data2{};
-    ExtractSiftOptions_t options = default_extract_options();
+    cusift_keypoints sift_data1{}, sift_data2{};
+    cusift_extract_options options = default_extract_options();
 
-    ExtractSiftFromImage(&im1, &sift_data1, &options);
-    ExtractSiftFromImage(&im2, &sift_data2, &options);
-    if (check_error("Extract (setup)")) { DeleteSiftData(&sift_data1); DeleteSiftData(&sift_data2); return false; }
+    cusift_extract(&im1, &sift_data1, &options);
+    cusift_extract(&im2, &sift_data2, &options);
+    if (check_error("Extract (setup)")) { cusift_keypoints_free(&sift_data1); cusift_keypoints_free(&sift_data2); return false; }
 
-    MatchSiftData(&sift_data1, &sift_data2);
-    if (check_error("MatchSiftData")) { DeleteSiftData(&sift_data1); DeleteSiftData(&sift_data2); return false; }
+    cusift_match(&sift_data1, &sift_data2);
+    if (check_error("cusift_match")) { cusift_keypoints_free(&sift_data1); cusift_keypoints_free(&sift_data2); return false; }
 
     int matched = 0;
-    for (int i = 0; i < sift_data1.numPts; i++)
-        if (sift_data1.h_data[i].match >= 0)
+    for (int i = 0; i < sift_data1.count; i++)
+        if (sift_data1.host[i].match >= 0)
             matched++;
 
-    std::cout << "  Matched " << matched << " / " << sift_data1.numPts << " keypoints" << std::endl;
+    std::cout << "  Matched " << matched << " / " << sift_data1.count << " keypoints" << std::endl;
 
     bool pass = matched > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sift_data1);
-    DeleteSiftData(&sift_data2);
+    cusift_keypoints_free(&sift_data1);
+    cusift_keypoints_free(&sift_data2);
     return pass;
 }
 
-// -- Test: FindHomography --------------------------------
+// -- Test: cusift_estimate_homography --------------------------------
 
-static bool test_find_homography(const Image_t& im1, const Image_t& im2)
+static bool test_find_homography(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] FindHomography" << std::endl;
+    std::cout << "[TEST] cusift_estimate_homography" << std::endl;
 
-    SiftData sift_data1{}, sift_data2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sift_data1{}, sift_data2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
-    ExtractSiftFromImage(&im1, &sift_data1, &eo);
-    ExtractSiftFromImage(&im2, &sift_data2, &eo);
-    MatchSiftData(&sift_data1, &sift_data2);
-    if (check_error("Extract+Match (setup)")) { DeleteSiftData(&sift_data1); DeleteSiftData(&sift_data2); return false; }
+    cusift_extract(&im1, &sift_data1, &eo);
+    cusift_extract(&im2, &sift_data2, &eo);
+    cusift_match(&sift_data1, &sift_data2);
+    if (check_error("Extract+Match (setup)")) { cusift_keypoints_free(&sift_data1); cusift_keypoints_free(&sift_data2); return false; }
 
     float homography[9];
     int num_matches = 0;
-    FindHomography(&sift_data1, homography, &num_matches, &ho);
-    if (check_error("FindHomography")) { DeleteSiftData(&sift_data1); DeleteSiftData(&sift_data2); return false; }
+    cusift_estimate_homography(&sift_data1, homography, &num_matches, &ho);
+    if (check_error("cusift_estimate_homography")) { cusift_keypoints_free(&sift_data1); cusift_keypoints_free(&sift_data2); return false; }
 
     std::cout << "  Inliers: " << num_matches << std::endl;
     print_homography(homography);
@@ -171,146 +178,146 @@ static bool test_find_homography(const Image_t& im1, const Image_t& im2)
     bool pass = num_matches > 0 && homography_is_valid(homography);
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sift_data1);
-    DeleteSiftData(&sift_data2);
+    cusift_keypoints_free(&sift_data1);
+    cusift_keypoints_free(&sift_data2);
     return pass;
 }
 
-// -- Test: WarpImages (CPU path) -------------------------
+// -- Test: cusift_warp (CPU path) -------------------------
 
-static bool test_warp_images_cpu(const Image_t& im1, const Image_t& im2)
+static bool test_warp_images_cpu(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] WarpImages (CPU)" << std::endl;
+    std::cout << "[TEST] cusift_warp (CPU)" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
-    ExtractSiftFromImage(&im1, &sd1, &eo);
-    ExtractSiftFromImage(&im2, &sd2, &eo);
-    MatchSiftData(&sd1, &sd2);
+    cusift_extract(&im1, &sd1, &eo);
+    cusift_extract(&im2, &sd2, &eo);
+    cusift_match(&sd1, &sd2);
 
     float H[9];
     int nm = 0;
-    FindHomography(&sd1, H, &nm, &ho);
+    cusift_estimate_homography(&sd1, H, &nm, &ho);
     if (check_error("setup") || !homography_is_valid(H))
     {
         std::cout << "  [SKIP] no valid homography" << std::endl;
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
         return false;
     }
 
-    Image_t w1 = {}, w2 = {};
-    WarpImages(&im1, &im2, H, &w1, &w2, false);
-    if (check_error("WarpImages (CPU)")) { DeleteSiftData(&sd1); DeleteSiftData(&sd2); return false; }
+    cusift_image w1 = {}, w2 = {};
+    cusift_warp(&im1, &im2, H, &w1, &w2, false);
+    if (check_error("cusift_warp (CPU)")) { cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2); return false; }
 
-    std::cout << "  Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+    std::cout << "  Warped size: " << w1.width << "x" << w1.height << std::endl;
 
-    bool pass = w1.host_img_ != nullptr && w2.host_img_ != nullptr && w1.width_ > 0 && w1.height_ > 0;
+    bool pass = w1.pixels != nullptr && w2.pixels != nullptr && w1.width > 0 && w1.height > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    FreeImage(&w1);
-    FreeImage(&w2);
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_image_free(&w1);
+    cusift_image_free(&w2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: WarpImages (GPU path) -------------------------
+// -- Test: cusift_warp (GPU path) -------------------------
 
-static bool test_warp_images_gpu(const Image_t& im1, const Image_t& im2)
+static bool test_warp_images_gpu(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] WarpImages (GPU)" << std::endl;
+    std::cout << "[TEST] cusift_warp (GPU)" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
-    ExtractSiftFromImage(&im1, &sd1, &eo);
-    ExtractSiftFromImage(&im2, &sd2, &eo);
-    MatchSiftData(&sd1, &sd2);
+    cusift_extract(&im1, &sd1, &eo);
+    cusift_extract(&im2, &sd2, &eo);
+    cusift_match(&sd1, &sd2);
 
     float H[9];
     int nm = 0;
-    FindHomography(&sd1, H, &nm, &ho);
+    cusift_estimate_homography(&sd1, H, &nm, &ho);
     if (check_error("setup") || !homography_is_valid(H))
     {
         std::cout << "  [SKIP] no valid homography" << std::endl;
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
         return false;
     }
 
-    Image_t w1 = {}, w2 = {};
-    WarpImages(&im1, &im2, H, &w1, &w2, true);
-    if (check_error("WarpImages (GPU)")) { DeleteSiftData(&sd1); DeleteSiftData(&sd2); return false; }
+    cusift_image w1 = {}, w2 = {};
+    cusift_warp(&im1, &im2, H, &w1, &w2, true);
+    if (check_error("cusift_warp (GPU)")) { cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2); return false; }
 
-    std::cout << "  Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+    std::cout << "  Warped size: " << w1.width << "x" << w1.height << std::endl;
 
-    bool pass = w1.host_img_ != nullptr && w2.host_img_ != nullptr && w1.width_ > 0 && w1.height_ > 0;
+    bool pass = w1.pixels != nullptr && w2.pixels != nullptr && w1.width > 0 && w1.height > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    FreeImage(&w1);
-    FreeImage(&w2);
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_image_free(&w1);
+    cusift_image_free(&w2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: WarpImages_GPU (returns device memory) --------
+// -- Test: cusift_warp_to_device (returns device memory) --------
 
-static bool test_warp_images_gpu_strided(const Image_t& im1, const Image_t& im2)
+static bool test_warp_images_gpu_strided(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] WarpImages_GPU" << std::endl;
+    std::cout << "[TEST] cusift_warp_to_device" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
-    ExtractSiftFromImage(&im1, &sd1, &eo);
-    ExtractSiftFromImage(&im2, &sd2, &eo);
-    MatchSiftData(&sd1, &sd2);
+    cusift_extract(&im1, &sd1, &eo);
+    cusift_extract(&im2, &sd2, &eo);
+    cusift_match(&sd1, &sd2);
 
     float H[9];
     int nm = 0;
-    FindHomography(&sd1, H, &nm, &ho);
+    cusift_estimate_homography(&sd1, H, &nm, &ho);
     if (check_error("setup") || !homography_is_valid(H))
     {
         std::cout << "  [SKIP] no valid homography" << std::endl;
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
         return false;
     }
 
-    ImageStrided_t w1 = {}, w2 = {};
-    WarpImages_GPU(&im1, &im2, H, &w1, &w2);
-    if (check_error("WarpImages_GPU")) { DeleteSiftData(&sd1); DeleteSiftData(&sd2); return false; }
+    cusift_device_image w1 = {}, w2 = {};
+    cusift_warp_to_device(&im1, &im2, H, &w1, &w2);
+    if (check_error("cusift_warp_to_device")) { cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2); return false; }
 
-    std::cout << "  Warped size: " << w1.width_ << "x" << w1.height_ << ", stride=" << w1.stride_ << std::endl;
+    std::cout << "  Warped size: " << w1.width << "x" << w1.height << ", stride=" << w1.pitch_bytes << std::endl;
 
-    bool pass = w1.strided_img_ != nullptr && w2.strided_img_ != nullptr
-             && w1.width_ > 0 && w1.height_ > 0 && w1.stride_ > 0;
+    bool pass = w1.device_pixels != nullptr && w2.device_pixels != nullptr
+             && w1.width > 0 && w1.height > 0 && w1.pitch_bytes > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    FreeImage_GPU(&w1);
-    FreeImage_GPU(&w2);
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_device_image_free(&w1);
+    cusift_device_image_free(&w2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: SaveSiftData ----------------------------------
+// -- Test: cusift_keypoints_save_json ----------------------------------
 
-static bool test_save_sift_data(const Image_t& im1)
+static bool test_save_sift_data(const cusift_image& im1)
 {
-    std::cout << "[TEST] SaveSiftData" << std::endl;
+    std::cout << "[TEST] cusift_keypoints_save_json" << std::endl;
 
-    SiftData sd{};
-    ExtractSiftOptions_t eo = default_extract_options();
+    cusift_keypoints sd{};
+    cusift_extract_options eo = default_extract_options();
 
-    ExtractSiftFromImage(&im1, &sd, &eo);
-    if (check_error("Extract (setup)")) { DeleteSiftData(&sd); return false; }
+    cusift_extract(&im1, &sd, &eo);
+    if (check_error("Extract (setup)")) { cusift_keypoints_free(&sd); return false; }
 
     const char* tmp_file = "test_sift_output.json";
-    SaveSiftData(tmp_file, &sd);
+    cusift_keypoints_save_json(tmp_file, &sd);
 
     FILE* f = fopen(tmp_file, "r");
     bool pass = (f != nullptr);
@@ -330,53 +337,53 @@ static bool test_save_sift_data(const Image_t& im1)
 
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sd);
+    cusift_keypoints_free(&sd);
     return pass;
 }
 
-// -- Test: ExtractAndMatchSift ---------------------------
+// -- Test: cusift_extract_and_match ---------------------------
 
-static bool test_extract_and_match(const Image_t& im1, const Image_t& im2)
+static bool test_extract_and_match(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchSift" << std::endl;
+    std::cout << "[TEST] cusift_extract_and_match" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
 
-    ExtractAndMatchSift(&im1, &im2, &sd1, &sd2, &eo);
-    if (check_error("ExtractAndMatchSift")) { DeleteSiftData(&sd1); DeleteSiftData(&sd2); return false; }
+    cusift_extract_and_match(&im1, &im2, &sd1, &sd2, &eo);
+    if (check_error("cusift_extract_and_match")) { cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2); return false; }
 
     int matched = 0;
-    for (int i = 0; i < sd1.numPts; i++)
-        if (sd1.h_data[i].match >= 0)
+    for (int i = 0; i < sd1.count; i++)
+        if (sd1.host[i].match >= 0)
             matched++;
 
-    std::cout << "  Image 1: " << sd1.numPts << " keypoints, Image 2: " << sd2.numPts << " keypoints" << std::endl;
+    std::cout << "  Image 1: " << sd1.count << " keypoints, Image 2: " << sd2.count << " keypoints" << std::endl;
     std::cout << "  Matched: " << matched << std::endl;
 
-    bool pass = sd1.numPts > 0 && sd2.numPts > 0 && matched > 0;
+    bool pass = sd1.count > 0 && sd2.count > 0 && matched > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: ExtractAndMatchAndFindHomography ---------------
+// -- Test: cusift_align ---------------
 
-static bool test_extract_match_homography(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomography" << std::endl;
+    std::cout << "[TEST] cusift_align" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
     float H[9];
     int nm = 0;
 
-    ExtractAndMatchAndFindHomography(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho);
-    if (check_error("ExtractAndMatchAndFindHomography")) { DeleteSiftData(&sd1); DeleteSiftData(&sd2); return false; }
+    cusift_align(&im1, &im2, &sd1, &sd2, &eo, &ho, H, &nm);
+    if (check_error("cusift_align")) { cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2); return false; }
 
     std::cout << "  Inliers: " << nm << std::endl;
     print_homography(H);
@@ -384,84 +391,84 @@ static bool test_extract_match_homography(const Image_t& im1, const Image_t& im2
     bool pass = nm > 0 && homography_is_valid(H);
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: ExtractAndMatchAndFindHomographyAndWarp --------
+// -- Test: cusift_align_and_warp --------
 
-static bool test_extract_match_homography_warp(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography_warp(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomographyAndWarp" << std::endl;
+    std::cout << "[TEST] cusift_align_and_warp" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
     float H[9];
     int nm = 0;
-    Image_t w1 = {}, w2 = {};
+    cusift_image w1 = {}, w2 = {};
 
-    ExtractAndMatchAndFindHomographyAndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho, &w1, &w2);
-    if (check_error("ExtractAndMatchAndFindHomographyAndWarp"))
+    cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho, H, &nm, &w1, &w2);
+    if (check_error("cusift_align_and_warp"))
     {
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
-        FreeImage(&w1); FreeImage(&w2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
+        cusift_image_free(&w1); cusift_image_free(&w2);
         return false;
     }
 
     std::cout << "  Inliers: " << nm << std::endl;
-    std::cout << "  Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+    std::cout << "  Warped size: " << w1.width << "x" << w1.height << std::endl;
     print_homography(H);
 
     bool pass = nm > 0 && homography_is_valid(H)
-             && w1.host_img_ != nullptr && w2.host_img_ != nullptr
-             && w1.width_ > 0 && w1.height_ > 0;
+             && w1.pixels != nullptr && w2.pixels != nullptr
+             && w1.width > 0 && w1.height > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    FreeImage(&w1);
-    FreeImage(&w2);
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_image_free(&w1);
+    cusift_image_free(&w2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: ExtractAndMatchAndFindHomographyAndWarp_GPU ----
+// -- Test: cusift_align_and_warp_to_device ----
 
-static bool test_extract_match_homography_warp_gpu(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography_warp_gpu(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomographyAndWarp_GPU" << std::endl;
+    std::cout << "[TEST] cusift_align_and_warp_to_device" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
     float H[9];
     int nm = 0;
-    ImageStrided_t w1 = {}, w2 = {};
+    cusift_device_image w1 = {}, w2 = {};
 
-    ExtractAndMatchAndFindHomographyAndWarp_GPU(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho, &w1, &w2);
-    if (check_error("ExtractAndMatchAndFindHomographyAndWarp_GPU"))
+    cusift_align_and_warp_to_device(&im1, &im2, &sd1, &sd2, &eo, &ho, H, &nm, &w1, &w2);
+    if (check_error("cusift_align_and_warp_to_device"))
     {
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
-        FreeImage_GPU(&w1); FreeImage_GPU(&w2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
+        cusift_device_image_free(&w1); cusift_device_image_free(&w2);
         return false;
     }
 
     std::cout << "  Inliers: " << nm << std::endl;
-    std::cout << "  Warped size: " << w1.width_ << "x" << w1.height_ << ", stride=" << w1.stride_ << std::endl;
+    std::cout << "  Warped size: " << w1.width << "x" << w1.height << ", stride=" << w1.pitch_bytes << std::endl;
     print_homography(H);
 
     bool pass = nm > 0 && homography_is_valid(H)
-             && w1.strided_img_ != nullptr && w2.strided_img_ != nullptr
-             && w1.width_ > 0 && w1.height_ > 0 && w1.stride_ > 0;
+             && w1.device_pixels != nullptr && w2.device_pixels != nullptr
+             && w1.width > 0 && w1.height > 0 && w1.pitch_bytes > 0;
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    FreeImage_GPU(&w1);
-    FreeImage_GPU(&w2);
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_device_image_free(&w1);
+    cusift_device_image_free(&w2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
@@ -483,19 +490,19 @@ static float homography_frobenius_diff(const float* A, const float* B)
     return std::sqrt(sum);
 }
 
-// -- Test: FindHomography with both model types ----------
+// -- Test: cusift_estimate_homography with both model types ----------
 
-static bool test_find_homography_both_models(const Image_t& im1, const Image_t& im2)
+static bool test_find_homography_both_models(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] FindHomography -- compare model types" << std::endl;
+    std::cout << "[TEST] cusift_estimate_homography -- compare model types" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
 
-    ExtractSiftFromImage(&im1, &sd1, &eo);
-    ExtractSiftFromImage(&im2, &sd2, &eo);
-    MatchSiftData(&sd1, &sd2);
-    if (check_error("Extract+Match (setup)")) { DeleteSiftData(&sd1); DeleteSiftData(&sd2); return false; }
+    cusift_extract(&im1, &sd1, &eo);
+    cusift_extract(&im2, &sd2, &eo);
+    cusift_match(&sd1, &sd2);
+    if (check_error("Extract+Match (setup)")) { cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2); return false; }
 
     float H_homo[9], H_sim[9];
     int nm_homo = 0, nm_sim = 0;
@@ -508,11 +515,11 @@ static bool test_find_homography_both_models(const Image_t& im1, const Image_t& 
 
     for (int i = 0; i < 2; i++)
     {
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.model_type_ = models[i];
+        cusift_homography_options ho = default_homography_options();
+        ho.model = models[i];
 
-        FindHomography(&sd1, results[i], counts[i], &ho);
-        if (check_error("FindHomography"))
+        cusift_estimate_homography(&sd1, results[i], counts[i], &ho);
+        if (check_error("cusift_estimate_homography"))
         {
             std::cerr << "  [FAIL] " << model_name(models[i]) << " failed" << std::endl;
             pass = false;
@@ -541,16 +548,16 @@ static bool test_find_homography_both_models(const Image_t& im1, const Image_t& 
 
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
-// -- Test: ExtractAndMatchAndFindHomography -- both models -
+// -- Test: cusift_align -- both models -
 
-static bool test_extract_match_homography_both_models(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography_both_models(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomography -- compare model types" << std::endl;
+    std::cout << "[TEST] cusift_align -- compare model types" << std::endl;
 
     float H_homo[9], H_sim[9];
     int nm_homo = 0, nm_sim = 0;
@@ -562,13 +569,13 @@ static bool test_extract_match_homography_both_models(const Image_t& im1, const 
 
     for (int i = 0; i < 2; i++)
     {
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.model_type_ = models[i];
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
+        ho.model = models[i];
 
-        ExtractAndMatchAndFindHomography(&im1, &im2, &sd1, &sd2, results[i], counts[i], &eo, &ho);
-        if (check_error("ExtractAndMatchAndFindHomography"))
+        cusift_align(&im1, &im2, &sd1, &sd2, &eo, &ho, results[i], counts[i]);
+        if (check_error("cusift_align"))
         {
             std::cerr << "  [FAIL] " << model_name(models[i]) << " failed" << std::endl;
             pass = false;
@@ -583,8 +590,8 @@ static bool test_extract_match_homography_both_models(const Image_t& im1, const 
                 pass = false;
             }
         }
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     if (homography_is_valid(H_homo) && homography_is_valid(H_sim))
@@ -599,9 +606,9 @@ static bool test_extract_match_homography_both_models(const Image_t& im1, const 
 
 // -- Test: Full pipeline (warp) -- both models ------------
 
-static bool test_extract_match_homography_warp_both_models(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography_warp_both_models(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomographyAndWarp -- compare model types" << std::endl;
+    std::cout << "[TEST] cusift_align_and_warp -- compare model types" << std::endl;
 
     float H_homo[9], H_sim[9];
     int nm_homo = 0, nm_sim = 0;
@@ -613,14 +620,14 @@ static bool test_extract_match_homography_warp_both_models(const Image_t& im1, c
 
     for (int i = 0; i < 2; i++)
     {
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.model_type_ = models[i];
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
+        ho.model = models[i];
 
-        Image_t w1 = {}, w2 = {};
-        ExtractAndMatchAndFindHomographyAndWarp(&im1, &im2, &sd1, &sd2, results[i], counts[i], &eo, &ho, &w1, &w2);
-        if (check_error("ExtractAndMatchAndFindHomographyAndWarp"))
+        cusift_image w1 = {}, w2 = {};
+        cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho, results[i], counts[i], &w1, &w2);
+        if (check_error("cusift_align_and_warp"))
         {
             std::cerr << "  [FAIL] " << model_name(models[i]) << " failed" << std::endl;
             pass = false;
@@ -628,19 +635,19 @@ static bool test_extract_match_homography_warp_both_models(const Image_t& im1, c
         else
         {
             std::cout << "  " << model_name(models[i]) << " -- inliers: " << *counts[i]
-                      << ", warped: " << w1.width_ << "x" << w1.height_ << std::endl;
+                      << ", warped: " << w1.width << "x" << w1.height << std::endl;
             print_homography(results[i]);
             if (*counts[i] == 0 || !homography_is_valid(results[i])
-                || w1.host_img_ == nullptr || w1.width_ == 0)
+                || w1.pixels == nullptr || w1.width == 0)
             {
                 std::cerr << "  [FAIL] " << model_name(models[i]) << " produced invalid result" << std::endl;
                 pass = false;
             }
         }
-        FreeImage(&w1);
-        FreeImage(&w2);
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_image_free(&w1);
+        cusift_image_free(&w2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     if (homography_is_valid(H_homo) && homography_is_valid(H_sim))
@@ -653,11 +660,11 @@ static bool test_extract_match_homography_warp_both_models(const Image_t& im1, c
     return pass;
 }
 
-// -- Test: ExtractAndMatchAndFindHomography_Multi --------
+// -- Test: cusift_align --------
 
-static bool test_extract_match_homography_multi(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography_multi(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomography_Multi" << std::endl;
+    std::cout << "[TEST] cusift_align" << std::endl;
 
     bool pass = true;
 
@@ -665,16 +672,18 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MAX_INLIERS, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.seed_ = 0; // non-deterministic seeds across attempts
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
+        ho.seed = 0; // non-deterministic seeds across attempts
 
         float H[9];
         int nm = 0;
 
-        ExtractAndMatchAndFindHomography_Multi(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                              num_attempts, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = num_attempts;
+        ho_k.goal = CUSIFT_GOAL_MAX_INLIERS;
+        cusift_align(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm);
         if (check_error("Multi (MAX_INLIERS)"))
         {
             pass = false;
@@ -689,24 +698,26 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
                 pass = false;
             }
         }
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     // Sub-test 2: MIN_EYE_DIFF goal with multiple attempts
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MIN_EYE_DIFF, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.seed_ = 0;
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
+        ho.seed = 0;
 
         float H[9];
         int nm = 0;
 
-        ExtractAndMatchAndFindHomography_Multi(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                              num_attempts, CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = num_attempts;
+        ho_k.goal = CUSIFT_GOAL_MIN_IDENTITY_DISTANCE;
+        cusift_align(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm);
         if (check_error("Multi (MIN_EYE_DIFF)"))
         {
             pass = false;
@@ -721,22 +732,24 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
                 pass = false;
             }
         }
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     // Sub-test 3: single attempt should behave like the non-Multi version
     {
-        std::cout << "  Single attempt (num_homography_attempts=1)" << std::endl;
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
+        std::cout << "  Single attempt (attempts=1)" << std::endl;
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
 
         float H[9];
         int nm = 0;
 
-        ExtractAndMatchAndFindHomography_Multi(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                              1, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = 1;
+        ho_k.goal = CUSIFT_GOAL_MAX_INLIERS;
+        cusift_align(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm);
         if (check_error("Multi (single attempt)"))
         {
             pass = false;
@@ -751,36 +764,38 @@ static bool test_extract_match_homography_multi(const Image_t& im1, const Image_
                 pass = false;
             }
         }
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
     return pass;
 }
 
-// -- Test: ExtractAndMatchAndFindHomography_Multi_AndWarp -
+// -- Test: cusift_align_and_warp -
 
-static bool test_extract_match_homography_multi_warp(const Image_t& im1, const Image_t& im2)
+static bool test_extract_match_homography_multi_warp(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ExtractAndMatchAndFindHomography_Multi_AndWarp" << std::endl;
+    std::cout << "[TEST] cusift_align_and_warp" << std::endl;
 
     bool pass = true;
 
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MAX_INLIERS, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.seed_ = 0;
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
+        ho.seed = 0;
 
         float H[9];
         int nm = 0;
-        Image_t w1 = {}, w2 = {};
+        cusift_image w1 = {}, w2 = {};
 
-        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                                       &w1, &w2, 5, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = 5;
+        ho_k.goal = CUSIFT_GOAL_MAX_INLIERS;
+        cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm, &w1, &w2);
         if (check_error("Multi_AndWarp (MAX_INLIERS)"))
         {
             pass = false;
@@ -788,36 +803,38 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
         else
         {
             std::cout << "    Inliers: " << nm << std::endl;
-            std::cout << "    Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+            std::cout << "    Warped size: " << w1.width << "x" << w1.height << std::endl;
             print_homography(H);
             if (nm <= 0 || !homography_is_valid(H)
-                || w1.host_img_ == nullptr || w2.host_img_ == nullptr
-                || w1.width_ <= 0 || w1.height_ <= 0)
+                || w1.pixels == nullptr || w2.pixels == nullptr
+                || w1.width <= 0 || w1.height <= 0)
             {
                 std::cerr << "    [FAIL] invalid result" << std::endl;
                 pass = false;
             }
         }
-        FreeImage(&w1);
-        FreeImage(&w2);
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_image_free(&w1);
+        cusift_image_free(&w2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     {
         constexpr int num_attempts = 20;
         std::cout << "  Goal: MIN_EYE_DIFF, " << num_attempts << " attempts" << std::endl;
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
-        ho.seed_ = 0;
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
+        ho.seed = 0;
 
         float H[9];
         int nm = 0;
-        Image_t w1 = {}, w2 = {};
+        cusift_image w1 = {}, w2 = {};
 
-        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                                       &w1, &w2, num_attempts, CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = num_attempts;
+        ho_k.goal = CUSIFT_GOAL_MIN_IDENTITY_DISTANCE;
+        cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm, &w1, &w2);
         if (check_error("Multi_AndWarp (MIN_EYE_DIFF)"))
         {
             pass = false;
@@ -825,34 +842,36 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
         else
         {
             std::cout << "    Inliers: " << nm << std::endl;
-            std::cout << "    Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+            std::cout << "    Warped size: " << w1.width << "x" << w1.height << std::endl;
             print_homography(H);
             if (nm <= 0 || !homography_is_valid(H)
-                || w1.host_img_ == nullptr || w2.host_img_ == nullptr
-                || w1.width_ <= 0 || w1.height_ <= 0)
+                || w1.pixels == nullptr || w2.pixels == nullptr
+                || w1.width <= 0 || w1.height <= 0)
             {
                 std::cerr << "    [FAIL] invalid result" << std::endl;
                 pass = false;
             }
         }
-        FreeImage(&w1);
-        FreeImage(&w2);
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_image_free(&w1);
+        cusift_image_free(&w2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     {
-        std::cout << "  Single attempt (num_homography_attempts=1)" << std::endl;
-        SiftData sd1{}, sd2{};
-        ExtractSiftOptions_t eo = default_extract_options();
-        FindHomographyOptions_t ho = default_homography_options();
+        std::cout << "  Single attempt (attempts=1)" << std::endl;
+        cusift_keypoints sd1{}, sd2{};
+        cusift_extract_options eo = default_extract_options();
+        cusift_homography_options ho = default_homography_options();
 
         float H[9];
         int nm = 0;
-        Image_t w1 = {}, w2 = {};
+        cusift_image w1 = {}, w2 = {};
 
-        ExtractAndMatchAndFindHomography_Multi_AndWarp(&im1, &im2, &sd1, &sd2, H, &nm, &eo, &ho,
-                                                       &w1, &w2, 1, CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS);
+        cusift_homography_options ho_k = ho;
+        ho_k.attempts = 1;
+        ho_k.goal = CUSIFT_GOAL_MAX_INLIERS;
+        cusift_align_and_warp(&im1, &im2, &sd1, &sd2, &eo, &ho_k, H, &nm, &w1, &w2);
         if (check_error("Multi_AndWarp (single attempt)"))
         {
             pass = false;
@@ -860,20 +879,20 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
         else
         {
             std::cout << "    Inliers: " << nm << std::endl;
-            std::cout << "    Warped size: " << w1.width_ << "x" << w1.height_ << std::endl;
+            std::cout << "    Warped size: " << w1.width << "x" << w1.height << std::endl;
             print_homography(H);
             if (nm <= 0 || !homography_is_valid(H)
-                || w1.host_img_ == nullptr || w2.host_img_ == nullptr
-                || w1.width_ <= 0 || w1.height_ <= 0)
+                || w1.pixels == nullptr || w2.pixels == nullptr
+                || w1.width <= 0 || w1.height <= 0)
             {
                 std::cerr << "    [FAIL] invalid result" << std::endl;
                 pass = false;
             }
         }
-        FreeImage(&w1);
-        FreeImage(&w2);
-        DeleteSiftData(&sd1);
-        DeleteSiftData(&sd2);
+        cusift_image_free(&w1);
+        cusift_image_free(&w2);
+        cusift_keypoints_free(&sd1);
+        cusift_keypoints_free(&sd2);
     }
 
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
@@ -882,43 +901,43 @@ static bool test_extract_match_homography_multi_warp(const Image_t& im1, const I
 
 // -- Test: VRAM estimation functions ---------------------
 
-static bool test_estimate_vram(const Image_t& im1, const Image_t& im2)
+static bool test_estimate_vram(const cusift_image& im1, const cusift_image& im2)
 {
     std::cout << "[TEST] VRAM Estimation Functions" << std::endl;
 
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
     bool pass = true;
 
-    // EstimateVramExtractSift
-    size_t extract_vram = EstimateVramExtractSift(im1.width_, im1.height_, &eo);
-    std::cout << "  EstimateVramExtractSift(" << im1.width_ << "x" << im1.height_ << "): "
+    // cusift_memory_extract
+    size_t extract_vram = cusift_memory_extract(im1.width, im1.height, &eo);
+    std::cout << "  cusift_memory_extract(" << im1.width << "x" << im1.height << "): "
               << extract_vram << " bytes (" << (extract_vram / (1024.0 * 1024.0)) << " MB)" << std::endl;
     if (extract_vram == 0) { std::cerr << "  [FAIL] extract estimate is 0" << std::endl; pass = false; }
 
-    // EstimateVramMatchSift
-    size_t match_vram = EstimateVramMatchSift(eo.max_keypoints_, eo.max_keypoints_);
-    std::cout << "  EstimateVramMatchSift(" << eo.max_keypoints_ << ", " << eo.max_keypoints_ << "): "
+    // cusift_memory_match
+    size_t match_vram = cusift_memory_match(eo.max_keypoints, eo.max_keypoints);
+    std::cout << "  cusift_memory_match(" << eo.max_keypoints << ", " << eo.max_keypoints << "): "
               << match_vram << " bytes (" << (match_vram / (1024.0 * 1024.0)) << " MB)" << std::endl;
     if (match_vram == 0) { std::cerr << "  [FAIL] match estimate is 0" << std::endl; pass = false; }
 
-    // EstimateVramFindHomography
-    size_t homo_vram = EstimateVramFindHomography(eo.max_keypoints_, &ho);
-    std::cout << "  EstimateVramFindHomography(" << eo.max_keypoints_ << "): "
+    // cusift_memory_homography
+    size_t homo_vram = cusift_memory_homography(eo.max_keypoints, &ho);
+    std::cout << "  cusift_memory_homography(" << eo.max_keypoints << "): "
               << homo_vram << " bytes (" << (homo_vram / (1024.0 * 1024.0)) << " MB)" << std::endl;
     if (homo_vram == 0) { std::cerr << "  [FAIL] homography estimate is 0" << std::endl; pass = false; }
 
-    // EstimateVramWarpImages
-    size_t warp_vram = EstimateVramWarpImages(im1.width_, im1.height_, im2.width_, im2.height_);
-    std::cout << "  EstimateVramWarpImages(" << im1.width_ << "x" << im1.height_
-              << ", " << im2.width_ << "x" << im2.height_ << "): "
+    // cusift_memory_warp
+    size_t warp_vram = cusift_memory_warp(im1.width, im1.height, im2.width, im2.height);
+    std::cout << "  cusift_memory_warp(" << im1.width << "x" << im1.height
+              << ", " << im2.width << "x" << im2.height << "): "
               << warp_vram << " bytes (" << (warp_vram / (1024.0 * 1024.0)) << " MB)" << std::endl;
     if (warp_vram == 0) { std::cerr << "  [FAIL] warp estimate is 0" << std::endl; pass = false; }
 
-    // EstimateVramFullPipeline
-    size_t full_vram = EstimateVramFullPipeline(im1.width_, im1.height_, im2.width_, im2.height_, &eo, &ho);
-    std::cout << "  EstimateVramFullPipeline: "
+    // cusift_memory_pipeline
+    size_t full_vram = cusift_memory_pipeline(im1.width, im1.height, im2.width, im2.height, &eo, &ho);
+    std::cout << "  cusift_memory_pipeline: "
               << full_vram << " bytes (" << (full_vram / (1024.0 * 1024.0)) << " MB)" << std::endl;
     if (full_vram == 0) { std::cerr << "  [FAIL] full pipeline estimate is 0" << std::endl; pass = false; }
 
@@ -930,8 +949,8 @@ static bool test_estimate_vram(const Image_t& im1, const Image_t& im2)
         pass = false;
     }
 
-    // Sanity: match estimate should equal 2 * sizeof(SiftPoint) * max_keypoints
-    size_t expected_match = 2 * sizeof(SiftPoint) * eo.max_keypoints_;
+    // Sanity: match estimate should equal 2 * sizeof(cusift_keypoint) * max_keypoints
+    size_t expected_match = 2 * sizeof(cusift_keypoint) * eo.max_keypoints;
     if (match_vram != expected_match)
     {
         std::cerr << "  [FAIL] match estimate (" << match_vram
@@ -943,48 +962,48 @@ static bool test_estimate_vram(const Image_t& im1, const Image_t& im2)
     return pass;
 }
 
-// -- Test: ComputeWarpGeometry ---------------------------
+// -- Test: cusift_compute_canvas ---------------------------
 
-static bool test_warp_geometry(const Image_t& im1, const Image_t& im2)
+static bool test_warp_geometry(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] ComputeWarpGeometry" << std::endl;
+    std::cout << "[TEST] cusift_compute_canvas" << std::endl;
 
-    SiftData sd1{}, sd2{};
-    ExtractSiftOptions_t eo = default_extract_options();
-    FindHomographyOptions_t ho = default_homography_options();
+    cusift_keypoints sd1{}, sd2{};
+    cusift_extract_options eo = default_extract_options();
+    cusift_homography_options ho = default_homography_options();
 
-    ExtractSiftFromImage(&im1, &sd1, &eo);
-    ExtractSiftFromImage(&im2, &sd2, &eo);
-    MatchSiftData(&sd1, &sd2);
+    cusift_extract(&im1, &sd1, &eo);
+    cusift_extract(&im2, &sd2, &eo);
+    cusift_match(&sd1, &sd2);
 
     float H[9];
     int nm = 0;
-    FindHomography(&sd1, H, &nm, &ho);
+    cusift_estimate_homography(&sd1, H, &nm, &ho);
     if (check_error("setup") || !homography_is_valid(H))
     {
         std::cout << "  [SKIP] no valid homography" << std::endl;
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
         return false;
     }
 
-    const int w1 = im1.width_, h1 = im1.height_, w2 = im2.width_, h2 = im2.height_;
+    const int w1 = im1.width, h1 = im1.height, w2 = im2.width, h2 = im2.height;
     bool pass = true;
 
-    WarpGeometry_t g{};
-    ComputeWarpGeometry(H, w1, h1, w2, h2, &g);
-    pass = pass && !check_error("ComputeWarpGeometry");
+    cusift_canvas g{};
+    cusift_compute_canvas(H, w1, h1, w2, h2, &g);
+    pass = pass && !check_error("cusift_compute_canvas");
     std::cout << "  Canvas: " << g.canvas_width << "x" << g.canvas_height
               << ", origin (" << g.origin_u << ", " << g.origin_v << ")" << std::endl;
     for (int k = 0; k < 4; k++)
         std::cout << "  image-2 corner " << k << " -> (" << g.corners2[k][0] << ", " << g.corners2[k][1] << ")" << std::endl;
 
     // 1. The warp allocates exactly the canvas the geometry predicts.
-    Image_t wa = {}, wb = {};
-    WarpImages(&im1, &im2, H, &wa, &wb, false);
-    pass = pass && !check_error("WarpImages");
-    if (wa.width_ != g.canvas_width || wa.height_ != g.canvas_height)
+    cusift_image wa = {}, wb = {};
+    cusift_warp(&im1, &im2, H, &wa, &wb, false);
+    pass = pass && !check_error("cusift_warp");
+    if (wa.width != g.canvas_width || wa.height != g.canvas_height)
     {
-        std::cout << "  [FAIL] warped size " << wa.width_ << "x" << wa.height_ << " != geometry" << std::endl;
+        std::cout << "  [FAIL] warped size " << wa.width << "x" << wa.height << " != geometry" << std::endl;
         pass = false;
     }
 
@@ -999,15 +1018,15 @@ static bool test_warp_geometry(const Image_t& im1, const Image_t& im2)
 
     // 3. The first valid column/row of the warped image 1 is the origin shift,
     //    which is how callers had to recover the origin before this API existed.
-    if (wa.host_img_)
+    if (wa.pixels)
     {
         int firstCol = -1, firstRow = -1;
         const int rowOfImage1 = -g.origin_v;   // a canvas row that image 1 covers
         const int colOfImage1 = -g.origin_u;   // a canvas column that image 1 covers
-        for (int x = 0; x < wa.width_ && firstCol < 0; x++)
-            if (!std::isnan(wa.host_img_[(size_t)rowOfImage1 * wa.width_ + x])) firstCol = x;
-        for (int y = 0; y < wa.height_ && firstRow < 0; y++)
-            if (!std::isnan(wa.host_img_[(size_t)y * wa.width_ + colOfImage1])) firstRow = y;
+        for (int x = 0; x < wa.width && firstCol < 0; x++)
+            if (!std::isnan(wa.pixels[(size_t)rowOfImage1 * wa.width + x])) firstCol = x;
+        for (int y = 0; y < wa.height && firstRow < 0; y++)
+            if (!std::isnan(wa.pixels[(size_t)y * wa.width + colOfImage1])) firstRow = y;
         if (firstCol != -g.origin_u || firstRow != -g.origin_v)
         {
             std::cout << "  [FAIL] first valid pixel of warped image 1 at (" << firstCol << ", " << firstRow
@@ -1038,9 +1057,9 @@ static bool test_warp_geometry(const Image_t& im1, const Image_t& im2)
 
     // 5. Degenerate inputs are reported through the error state.
     float Hzero[9] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    WarpGeometry_t gz{};
-    ComputeWarpGeometry(Hzero, w1, h1, w2, h2, &gz);
-    if (!CusiftHadError())
+    cusift_canvas gz{};
+    cusift_compute_canvas(Hzero, w1, h1, w2, h2, &gz);
+    if (!cusift_last_error(nullptr))
     {
         std::cout << "  [FAIL] singular homography was not rejected" << std::endl;
         pass = false;
@@ -1049,21 +1068,21 @@ static bool test_warp_geometry(const Image_t& im1, const Image_t& im2)
     // 6. A canvas beyond the 2x guard is rejected like the warp rejects it,
     //    but the geometry is still filled so the caller can see the size.
     float Hfar[9] = {1.0f, 0.0f, -(float)(3 * w1), 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};  // image 2 sits 3 widths to the right
-    WarpGeometry_t gf{};
-    ComputeWarpGeometry(Hfar, w1, h1, w2, h2, &gf);
-    if (!CusiftHadError() || gf.canvas_width <= 2 * std::max(w1, w2))
+    cusift_canvas gf{};
+    cusift_compute_canvas(Hfar, w1, h1, w2, h2, &gf);
+    if (!cusift_last_error(nullptr) || gf.canvas_width <= 2 * std::max(w1, w2))
     {
-        std::cout << "  [FAIL] oversized canvas not reported (had_error=" << CusiftHadError()
+        std::cout << "  [FAIL] oversized canvas not reported (had_error=" << cusift_last_error(nullptr)
                   << ", width=" << gf.canvas_width << ")" << std::endl;
         pass = false;
     }
 
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
 
-    FreeImage(&wa);
-    FreeImage(&wb);
-    DeleteSiftData(&sd1);
-    DeleteSiftData(&sd2);
+    cusift_image_free(&wa);
+    cusift_image_free(&wb);
+    cusift_keypoints_free(&sd1);
+    cusift_keypoints_free(&sd2);
     return pass;
 }
 
@@ -1077,7 +1096,7 @@ struct ErrorTally
     std::string last_message;
 };
 
-static void tally_callback(const CusiftErrorRecord_t* r, void* user)
+static void tally_callback(const cusift_error_record* r, void* user)
 {
     ErrorTally* t = static_cast<ErrorTally*>(user);
     if (r->severity == 0) t->errors++; else t->warnings++;
@@ -1091,7 +1110,7 @@ static std::string read_file(const std::string& path)
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
-static bool test_error_log(const Image_t& im1)
+static bool test_error_log(const cusift_image& im1)
 {
     std::cout << "[TEST] Error log file and callback" << std::endl;
     bool pass = true;
@@ -1101,23 +1120,23 @@ static bool test_error_log(const Image_t& im1)
     std::remove(rotated.c_str());
 
     ErrorTally tally;
-    CusiftSetErrorCallback(tally_callback, &tally);
-    CusiftSetErrorLog(path.c_str(), 1500); // small cap so the loop below rotates the file
+    cusift_set_error_callback(tally_callback, &tally);
+    cusift_set_error_log(path.c_str(), 1500); // small cap so the loop below rotates the file
 
-    ExtractSiftOptions_t eo = default_extract_options();
+    cusift_extract_options eo = default_extract_options();
     float dummy[64] = {0.0f};
-    Image_t bad = { dummy, 4, 4 };
+    cusift_image bad = { dummy, 4, 4 };
     const int N = 25;
     for (int i = 0; i < N; i++)
     {
-        SiftData sd{};
-        ExtractSiftFromImage(&bad, &sd, &eo);
-        DeleteSiftData(&sd);
+        cusift_keypoints sd{};
+        cusift_extract(&bad, &sd, &eo);
+        cusift_keypoints_free(&sd);
     }
 
     // 1. Every error reached the callback, with the public function and message.
     if (tally.errors != N || tally.warnings != 0
-        || tally.last_function != "ExtractSiftFromImage"
+        || tally.last_function != "cusift_extract"
         || tally.last_message.find("at least 8 pixels") == std::string::npos)
     {
         std::cout << "  [FAIL] callback saw " << tally.errors << " errors / " << tally.warnings << " warnings, last: "
@@ -1127,7 +1146,7 @@ static bool test_error_log(const Image_t& im1)
 
     // 2. The file holds complete lines and was rotated at the cap.
     const std::string content = read_file(path);
-    const bool has_line = content.find("ExtractSiftFromImage") != std::string::npos
+    const bool has_line = content.find("cusift_extract") != std::string::npos
                        && content.find("at least 8 pixels") != std::string::npos
                        && content.find(" error ") != std::string::npos
                        && content.find("Z ") != std::string::npos;
@@ -1141,17 +1160,17 @@ static bool test_error_log(const Image_t& im1)
     }
 
     // 3. Nothing was dropped.
-    if (CusiftErrorLogDroppedCount() != 0)
+    if (cusift_error_log_dropped() != 0)
     {
-        std::cout << "  [FAIL] dropped " << CusiftErrorLogDroppedCount() << " records" << std::endl;
+        std::cout << "  [FAIL] dropped " << cusift_error_log_dropped() << " records" << std::endl;
         pass = false;
     }
 
     // 4. A successful call reports nothing.
     {
-        SiftData sd{};
-        ExtractSiftFromImage(&im1, &sd, &eo);
-        DeleteSiftData(&sd);
+        cusift_keypoints sd{};
+        cusift_extract(&im1, &sd, &eo);
+        cusift_keypoints_free(&sd);
         if (tally.errors != N)
         {
             std::cout << "  [FAIL] a successful call produced a report" << std::endl;
@@ -1160,18 +1179,18 @@ static bool test_error_log(const Image_t& im1)
     }
 
     // 5. Turning the file off keeps the callback; turning the callback off silences it.
-    CusiftSetErrorLog(NULL, 0);
+    cusift_set_error_log(NULL, 0);
     {
-        SiftData sd{};
-        ExtractSiftFromImage(&bad, &sd, &eo);
-        DeleteSiftData(&sd);
+        cusift_keypoints sd{};
+        cusift_extract(&bad, &sd, &eo);
+        cusift_keypoints_free(&sd);
     }
     const size_t size_after_off = read_file(path).size();
-    CusiftSetErrorCallback(NULL, NULL);
+    cusift_set_error_callback(NULL, NULL);
     {
-        SiftData sd{};
-        ExtractSiftFromImage(&bad, &sd, &eo);
-        DeleteSiftData(&sd);
+        cusift_keypoints sd{};
+        cusift_extract(&bad, &sd, &eo);
+        cusift_keypoints_free(&sd);
     }
     if (tally.errors != N + 1 || size_after_off != content.size())
     {
@@ -1187,13 +1206,12 @@ static bool test_error_log(const Image_t& im1)
 
 // -- Test: input validation and device reset --------------
 
-static bool test_input_validation(const Image_t& im1, const Image_t& im2)
+static bool test_input_validation(const cusift_image& im1, const cusift_image& im2)
 {
-    std::cout << "[TEST] Input validation and CusiftResetDevice" << std::endl;
+    std::cout << "[TEST] Input validation and cusift_device_reset" << std::endl;
     bool pass = true;
-    ExtractSiftOptions_t eo = default_extract_options();
-    char msg[256], file[256];
-    int line = 0;
+    cusift_extract_options eo = default_extract_options();
+    std::string msg;
 
     // 1. Dimensions outside [8, 65535] must be rejected before any GPU work or
     //    any read of the pixel buffer (the buffer here is far too small).
@@ -1202,64 +1220,64 @@ static bool test_input_validation(const Image_t& im1, const Image_t& im2)
     const Case cases[] = {{"4x4", 4, 4}, {"4000x1", 4000, 1}, {"70000x8", 70000, 8}, {"8x70000", 8, 70000}};
     for (const Case& c : cases)
     {
-        SiftData sd{};
-        Image_t bad = { dummy, c.w, c.h };
-        ExtractSiftFromImage(&bad, &sd, &eo);
-        bool rejected = CusiftHadError() != 0;
-        CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
-        std::cout << "  " << c.name << ": " << (rejected ? msg : "ACCEPTED (wrong)") << std::endl;
+        cusift_keypoints sd{};
+        cusift_image bad = { dummy, c.w, c.h };
+        cusift_extract(&bad, &sd, &eo);
+        msg = last_error_message();
+        bool rejected = !msg.empty();
+        std::cout << "  " << c.name << ": " << (rejected ? msg.c_str() : "ACCEPTED (wrong)") << std::endl;
         if (!rejected) pass = false;
-        DeleteSiftData(&sd);
+        cusift_keypoints_free(&sd);
     }
 
-    // 2. A device pointer passed as host_img_ must be classified and rejected
+    // 2. A device pointer passed as pixels must be classified and rejected
     //    on every path, including the CPU warp that used to dereference it.
     {
-        SiftData sd1{}, sd2{};
-        FindHomographyOptions_t ho = default_homography_options();
+        cusift_keypoints sd1{}, sd2{};
+        cusift_homography_options ho = default_homography_options();
         float H[9]; int nm = 0;
-        ExtractSiftFromImage(&im1, &sd1, &eo);
-        ExtractSiftFromImage(&im2, &sd2, &eo);
-        MatchSiftData(&sd1, &sd2);
-        FindHomography(&sd1, H, &nm, &ho);
-        ImageStrided_t g1 = {}, g2 = {};
+        cusift_extract(&im1, &sd1, &eo);
+        cusift_extract(&im2, &sd2, &eo);
+        cusift_match(&sd1, &sd2);
+        cusift_estimate_homography(&sd1, H, &nm, &ho);
+        cusift_device_image g1 = {}, g2 = {};
         if (!check_error("setup") && homography_is_valid(H))
         {
-            WarpImages_GPU(&im1, &im2, H, &g1, &g2);
-            if (!check_error("WarpImages_GPU") && g1.strided_img_)
+            cusift_warp_to_device(&im1, &im2, H, &g1, &g2);
+            if (!check_error("cusift_warp_to_device") && g1.device_pixels)
             {
-                Image_t dev = { g1.strided_img_, g1.width_, g1.height_ };   // device memory
-                SiftData sd3{};
-                ExtractSiftFromImage(&dev, &sd3, &eo);
-                bool rejected = CusiftHadError() != 0;
-                CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
-                std::cout << "  device pointer -> ExtractSiftFromImage: " << (rejected ? msg : "ACCEPTED (wrong)") << std::endl;
+                cusift_image dev = { g1.device_pixels, g1.width, g1.height };   // device memory
+                cusift_keypoints sd3{};
+                cusift_extract(&dev, &sd3, &eo);
+                msg = last_error_message();
+                bool rejected = !msg.empty();
+                std::cout << "  device pointer -> cusift_extract: " << (rejected ? msg.c_str() : "ACCEPTED (wrong)") << std::endl;
                 if (!rejected) pass = false;
-                DeleteSiftData(&sd3);
+                cusift_keypoints_free(&sd3);
 
-                Image_t o1 = {}, o2 = {};
-                WarpImages(&dev, &im2, H, &o1, &o2, false);
-                rejected = CusiftHadError() != 0;
-                CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
-                std::cout << "  device pointer -> WarpImages (CPU): " << (rejected ? msg : "ACCEPTED (wrong)") << std::endl;
+                cusift_image o1 = {}, o2 = {};
+                cusift_warp(&dev, &im2, H, &o1, &o2, false);
+                msg = last_error_message();
+                rejected = !msg.empty();
+                std::cout << "  device pointer -> cusift_warp (CPU): " << (rejected ? msg.c_str() : "ACCEPTED (wrong)") << std::endl;
                 if (!rejected) pass = false;
-                FreeImage(&o1); FreeImage(&o2);
+                cusift_image_free(&o1); cusift_image_free(&o2);
             }
         }
-        FreeImage_GPU(&g1); FreeImage_GPU(&g2);
-        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+        cusift_device_image_free(&g1); cusift_device_image_free(&g2);
+        cusift_keypoints_free(&sd1); cusift_keypoints_free(&sd2);
     }
 
     // 3. The reset must leave the device usable.  Every library object above
     //    has been freed, as the contract requires.
-    CusiftResetDevice();
-    if (check_error("CusiftResetDevice")) pass = false;
+    cusift_device_reset();
+    if (check_error("cusift_device_reset")) pass = false;
     {
-        SiftData sd{};
-        ExtractSiftFromImage(&im1, &sd, &eo);
-        if (check_error("ExtractSiftFromImage after reset") || sd.numPts <= 0) pass = false;
-        std::cout << "  after reset: " << sd.numPts << " keypoints" << std::endl;
-        DeleteSiftData(&sd);
+        cusift_keypoints sd{};
+        cusift_extract(&im1, &sd, &eo);
+        if (check_error("cusift_extract after reset") || sd.count <= 0) pass = false;
+        std::cout << "  after reset: " << sd.count << " keypoints" << std::endl;
+        cusift_keypoints_free(&sd);
     }
 
     std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
@@ -1291,10 +1309,10 @@ int main(int argc, char* argv[])
     std::cout << "Image 2: " << image2_path << " (" << width2 << "x" << height2 << ")" << std::endl;
     std::cout << std::endl;
 
-    Image_t im1 = { image1.data(), width1, height1 };
-    Image_t im2 = { image2.data(), width2, height2 };
+    cusift_image im1 = { image1.data(), width1, height1 };
+    cusift_image im2 = { image2.data(), width2, height2 };
 
-    InitializeCudaSift();
+    cusift_init();
 
     int passed = 0, failed = 0, total = 0;
 

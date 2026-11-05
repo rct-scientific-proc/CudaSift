@@ -5,6 +5,10 @@
 #include "cusift.h"
 #include <stdbool.h>
 
+// The kernels and host pipeline keep the upstream CudaSift type names; they
+// are the public types under their 3.0 names.
+typedef cusift_keypoint  SiftPoint;
+typedef cusift_keypoints SiftData;
 
 #ifdef __cplusplus
 extern "C" {

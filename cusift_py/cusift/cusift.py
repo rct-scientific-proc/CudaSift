@@ -16,20 +16,20 @@ from typing import Callable, List, Optional, Union
 import numpy as np
 
 from cusift._bindings import (
-    CusiftErrorCallback_t,
-    CusiftErrorRecord_t,
-    ExtractSiftOptions_t,
-    FindHomographyOptions_t,
-    Image_t,
-    SiftData,
-    SiftPoint,
-    WarpGeometry_t,
+    cusift_error_callback,
+    cusift_error_record,
+    cusift_extract_options,
+    cusift_homography_options,
+    cusift_image,
+    cusift_keypoints,
+    cusift_keypoint,
+    cusift_canvas,
     load_library,
 )
 
 # Limits mirrored from the C library.  The C side rejects these too, but a
 # Python ValueError is friendlier than a CuSiftError from inside the call.
-_MAX_KEYPOINTS_LIMIT = (2**31 - 1) // ctypes.sizeof(SiftPoint)
+_MAX_KEYPOINTS_LIMIT = (2**31 - 1) // ctypes.sizeof(cusift_keypoint)
 _MAX_RANSAC_LOOPS = 65535 * 16
 
 
@@ -47,10 +47,10 @@ class CuSiftError(Exception):
 
 # -- Homography goal constants ------------------------------------------------
 
-HOMOGRAPHY_GOAL_MAX_INLIERS = 0
+GOAL_MAX_INLIERS = 0
 """Maximise the number of RANSAC inliers."""
 
-HOMOGRAPHY_GOAL_MIN_EYE_DIFF = 1
+GOAL_MIN_IDENTITY_DISTANCE = 1
 """Minimise the Frobenius distance between the top-left 2x2 block and the identity matrix."""
 
 
@@ -64,17 +64,12 @@ MODEL_SIMILARITY = 1
 
 
 def _check_error(lib: ctypes.CDLL) -> None:
-    """Query the library error flag; raise :class:`CuSiftError` if set."""
-    if lib.CusiftHadError():
-        line = c_int(0)
-        fname = ctypes.create_string_buffer(256)
-        msg = ctypes.create_string_buffer(256)
-        lib.CusiftGetLastErrorString(byref(line), fname, len(fname), msg, len(msg))
-        raise CuSiftError(
-            msg.value.decode("utf-8", errors="replace"),
-            filename=fname.value.decode("utf-8", errors="replace"),
-            line=line.value,
-        )
+    """Raise :class:`CuSiftError` if the last library call on this thread failed."""
+    rec = cusift_error_record()
+    if lib.cusift_last_error(byref(rec)):
+        def s(b):
+            return b.decode("utf-8", errors="replace") if b else ""
+        raise CuSiftError(s(rec.message), filename=s(rec.file), line=int(rec.line))
 
 
 # -- Data classes -------------------------------------------------------------
@@ -100,11 +95,11 @@ class Keypoint:
     descriptor: np.ndarray = field(repr=False)  # shape (128,)
 
     @classmethod
-    def _from_sift_point(cls, pt: SiftPoint) -> "Keypoint":
-        desc = np.ctypeslib.as_array(pt.data, shape=(128,)).copy()
+    def _from_sift_point(cls, pt: cusift_keypoint) -> "Keypoint":
+        desc = np.ctypeslib.as_array(pt.descriptor, shape=(128,)).copy()
         return cls(
-            x=pt.xpos,
-            y=pt.ypos,
+            x=pt.x,
+            y=pt.y,
             scale=pt.scale,
             sharpness=pt.sharpness,
             edgeness=pt.edgeness,
@@ -112,8 +107,8 @@ class Keypoint:
             score=pt.score,
             ambiguity=pt.ambiguity,
             match=pt.match,
-            match_x=pt.match_xpos,
-            match_y=pt.match_ypos,
+            match_x=pt.match_x,
+            match_y=pt.match_y,
             match_error=pt.match_error,
             subsampling=pt.subsampling,
             descriptor=desc,
@@ -132,7 +127,7 @@ class MatchResult:
     """Index into the *first* keypoint list (query)."""
 
     match_index: int
-    """Index stored in ``SiftPoint.match`` (index into the second set, or -1 if unmatched)."""
+    """Index stored in ``cusift_keypoint.match`` (index into the second set, or -1 if unmatched)."""
 
     x1: float
     """x position of the query keypoint."""
@@ -158,7 +153,7 @@ class MatchResult:
 
 @dataclass
 class ErrorRecord:
-    """One error or warning reported by the library (see ``CusiftErrorRecord_t``).
+    """One error or warning reported by the library (see ``cusift_error_record``).
 
     ``severity`` is 0 for an error (the call failed) and 1 for a warning (the
     call completed in a degraded way).
@@ -175,7 +170,7 @@ class ErrorRecord:
     timestamp_ms: int
 
     @classmethod
-    def _from_ctypes(cls, r: CusiftErrorRecord_t) -> "ErrorRecord":
+    def _from_ctypes(cls, r: cusift_error_record) -> "ErrorRecord":
         def s(b: Optional[bytes]) -> str:
             return b.decode("utf-8", errors="replace") if b else ""
         return cls(severity=int(r.severity), function=s(r.function), file=s(r.file), line=int(r.line),
@@ -184,10 +179,10 @@ class ErrorRecord:
 
 
 @dataclass
-class WarpGeometry:
-    """Where the two inputs land on the common canvas (see ``WarpGeometry_t``).
+class Canvas:
+    """Where the two inputs land on the common canvas (see ``cusift_canvas``).
 
-    Returned by :meth:`CuSift.compute_warp_geometry`.  The canvas is image 1's
+    Returned by :meth:`CuSift.compute_canvas`.  The canvas is image 1's
     frame extended to hold image 2; canvas pixel ``(0, 0)`` is image-1
     coordinate ``origin``.  Corners are in canvas pixel coordinates, in the
     order ``(0, 0), (w-1, 0), (w-1, h-1), (0, h-1)`` of the source image.
@@ -206,7 +201,7 @@ class WarpGeometry:
     """``(4, 2)`` float32 array: image-2 corners on the canvas (sub-pixel)."""
 
     @classmethod
-    def _from_ctypes(cls, g: WarpGeometry_t) -> "WarpGeometry":
+    def _from_ctypes(cls, g: cusift_canvas) -> "Canvas":
         return cls(
             origin=(int(g.origin_u), int(g.origin_v)),
             canvas_size=(int(g.canvas_width), int(g.canvas_height)),
@@ -217,110 +212,101 @@ class WarpGeometry:
 
 @dataclass
 class ExtractOptions:
-    """Parameters for SIFT feature extraction.
+    """Parameters for SIFT extraction.
 
-    See ``ExtractSiftOptions_t`` in ``cusift.h`` for full documentation.
+    Field names and defaults are those of ``cusift_extract_options`` and
+    ``cusift_default_extract_options()`` in ``cusift.h``, which documents each.
     """
 
-    thresh: float = 3.0
-    """Contrast threshold for DoG extrema (higher = fewer, more stable keypoints)."""
-
+    contrast_threshold: float = 2.0
     lowest_scale: float = 0.0
-    """Minimum feature scale in pixels (0.0 keeps all scales)."""
-
-    highest_scale: float = float('inf')
-    """Maximum feature scale in pixels (+inf keeps all scales)."""
-
-    edge_thresh: float = 10.0
-    """Edge rejection threshold (ratio of principal curvatures)."""
-
-    init_blur: float = 1.0
-    """Assumed blur (sigma) of the input image."""
-
+    highest_scale: float = float("inf")
+    edge_threshold: float = 10.0
+    initial_blur: float = 1.0
     max_keypoints: int = 32768
-    """Maximum number of keypoints returned."""
-
     num_octaves: int = 5
-    """Number of octave levels in the scale-space pyramid."""
-
     scale_suppression_radius: float = 0.0
-    """Scale-NMS radius multiplier (0 = disabled). When > 0, smaller-scale
-    keypoints within ``radius * larger_scale`` pixels of a larger keypoint
-    are removed. 6.0 is a good starting value."""
 
-    def _to_ctypes(self) -> ExtractSiftOptions_t:
+    def _to_ctypes(self) -> cusift_extract_options:
         if not (1 <= int(self.max_keypoints) <= _MAX_KEYPOINTS_LIMIT):
             raise ValueError(
                 f"max_keypoints must be in [1, {_MAX_KEYPOINTS_LIMIT}], got {self.max_keypoints}"
             )
-        return ExtractSiftOptions_t(
-            thresh_=self.thresh,
-            lowest_scale_=self.lowest_scale,
-            highest_scale_=self.highest_scale,
-            edge_thresh_=self.edge_thresh,
-            init_blur_=self.init_blur,
-            max_keypoints_=self.max_keypoints,
-            num_octaves_=self.num_octaves,
-            scale_suppression_radius_=self.scale_suppression_radius,
+        return cusift_extract_options(
+            contrast_threshold=self.contrast_threshold,
+            lowest_scale=self.lowest_scale,
+            highest_scale=self.highest_scale,
+            edge_threshold=self.edge_threshold,
+            initial_blur=self.initial_blur,
+            max_keypoints=self.max_keypoints,
+            num_octaves=self.num_octaves,
+            scale_suppression_radius=self.scale_suppression_radius,
         )
 
 
 @dataclass
 class HomographyOptions:
-    """Parameters for RANSAC homography estimation.
+    """Parameters for homography estimation.
 
-    See ``FindHomographyOptions_t`` in ``cusift.h`` for full documentation.
+    Field names and defaults are those of ``cusift_homography_options`` and
+    ``cusift_default_homography_options()`` in ``cusift.h``, which documents
+    each.  ``attempts`` > 1 runs the estimate several times and keeps one by
+    ``goal`` (:data:`GOAL_MAX_INLIERS` or :data:`GOAL_MIN_IDENTITY_DISTANCE`).
     """
 
-    num_loops: int = 10000
+    ransac_iterations: int = 10000
     min_score: float = 0.0
-    max_ambiguity: float = 0.80
-    thresh: float = 5.0
-    improve_num_loops: int = 5
-    improve_min_score: float = 0.0
-    improve_max_ambiguity: float = 0.80
-    improve_thresh: float = 3.0
+    max_ambiguity: float = 0.8
+    inlier_threshold: float = 3.0
+    refine_iterations: int = 5
+    refine_min_score: float = 0.0
+    refine_max_ambiguity: float = 0.8
+    refine_inlier_threshold: float = 2.0
     seed: int = 0
-    model_type: int = MODEL_HOMOGRAPHY
-    """Geometric model to fit: :data:`MODEL_HOMOGRAPHY` (0, default) or
-    :data:`MODEL_SIMILARITY` (1)."""
+    model: int = MODEL_HOMOGRAPHY
+    attempts: int = 1
+    goal: int = GOAL_MAX_INLIERS
 
-    def _to_ctypes(self) -> FindHomographyOptions_t:
-        if not (1 <= int(self.num_loops) <= _MAX_RANSAC_LOOPS):
+    def _to_ctypes(self) -> cusift_homography_options:
+        if not (1 <= int(self.ransac_iterations) <= _MAX_RANSAC_LOOPS):
             raise ValueError(
-                f"num_loops must be in [1, {_MAX_RANSAC_LOOPS}], got {self.num_loops}"
+                f"ransac_iterations must be in [1, {_MAX_RANSAC_LOOPS}], got {self.ransac_iterations}"
             )
-        if int(self.improve_num_loops) < 0:
-            raise ValueError(f"improve_num_loops must be >= 0, got {self.improve_num_loops}")
-        return FindHomographyOptions_t(
-            num_loops_=self.num_loops,
-            min_score_=self.min_score,
-            max_ambiguity_=self.max_ambiguity,
-            thresh_=self.thresh,
-            improve_num_loops_=self.improve_num_loops,
-            improve_min_score_=self.improve_min_score,
-            improve_max_ambiguity_=self.improve_max_ambiguity,
-            improve_thresh_=self.improve_thresh,
-            seed_=self.seed,
-            model_type_=self.model_type,
+        if int(self.refine_iterations) < 0:
+            raise ValueError(f"refine_iterations must be >= 0, got {self.refine_iterations}")
+        if int(self.attempts) < 1:
+            raise ValueError(f"attempts must be >= 1, got {self.attempts}")
+        return cusift_homography_options(
+            ransac_iterations=self.ransac_iterations,
+            min_score=self.min_score,
+            max_ambiguity=self.max_ambiguity,
+            inlier_threshold=self.inlier_threshold,
+            refine_iterations=self.refine_iterations,
+            refine_min_score=self.refine_min_score,
+            refine_max_ambiguity=self.refine_max_ambiguity,
+            refine_inlier_threshold=self.refine_inlier_threshold,
+            seed=self.seed,
+            model=self.model,
+            attempts=self.attempts,
+            goal=self.goal,
         )
 
 
-# -- Helper: build an Image_t from numpy -------------------------------------
+# -- Helper: build an cusift_image from numpy -------------------------------------
 
 
-def _make_image_t(pixels: np.ndarray, width: int, height: int) -> tuple[Image_t, np.ndarray]:
-    """Wrap a contiguous float32 array in an ``Image_t``.
+def _make_image_t(pixels: np.ndarray, width: int, height: int) -> tuple[cusift_image, np.ndarray]:
+    """Wrap a contiguous float32 array in an ``cusift_image``.
 
     Returns the struct *and* the backing array (to prevent GC).
     """
     if pixels.dtype != np.float32:
         pixels = pixels.astype(np.float32)
     pixels = np.ascontiguousarray(pixels)
-    img = Image_t()
-    img.host_img_ = pixels.ctypes.data_as(POINTER(c_float))
-    img.width_ = width
-    img.height_ = height
+    img = cusift_image()
+    img.pixels = pixels.ctypes.data_as(POINTER(c_float))
+    img.width = width
+    img.height = height
     return img, pixels
 
 
@@ -396,15 +382,15 @@ def _resolve_image_arg(
     return pixels, w, h
 
 
-# -- Keypoint list with SiftData handle ---------------------------------------
+# -- Keypoint list with cusift_keypoints handle ---------------------------------------
 
 
-class KeypointList(list):
-    """A ``list[Keypoint]`` that also carries the underlying ``SiftData``.
+class Keypoints(list):
+    """A ``list[Keypoint]`` that also carries the underlying ``cusift_keypoints``.
 
     Users interact with this exactly like a normal list.  Internally the
-    C ``SiftData`` struct is kept alive so it can be passed to
-    :meth:`CuSift.match` and :meth:`CuSift.find_homography` without
+    C ``cusift_keypoints`` struct is kept alive so it can be passed to
+    :meth:`CuSift.match` and :meth:`CuSift.estimate_homography` without
     re-uploading descriptors to the GPU.
 
     Call :meth:`free` (or use as a context manager) to release GPU
@@ -412,7 +398,7 @@ class KeypointList(list):
     collected.
     """
 
-    def __init__(self, keypoints: List[Keypoint], sift_data: SiftData, lib: ctypes.CDLL):
+    def __init__(self, keypoints: List[Keypoint], sift_data: cusift_keypoints, lib: ctypes.CDLL):
         super().__init__(keypoints)
         self._sift_data = sift_data
         self._lib = lib
@@ -420,15 +406,15 @@ class KeypointList(list):
         # reference cycles (tracebacks, REPL `_`, Optuna trial state) and runs
         # reliably even at interpreter shutdown.
         self._finalizer = weakref.finalize(
-            self, KeypointList._cleanup, lib, sift_data
+            self, Keypoints._cleanup, lib, sift_data
         )
 
     @staticmethod
-    def _cleanup(lib: ctypes.CDLL, sift_data: SiftData) -> None:
+    def _cleanup(lib: ctypes.CDLL, sift_data: cusift_keypoints) -> None:
         # `byref` and `lib` may not be available during interpreter shutdown;
         # swallow any exception so the finalizer never reports an error.
         try:
-            lib.DeleteSiftData(ctypes.byref(sift_data))
+            lib.cusift_keypoints_free(ctypes.byref(sift_data))
         except Exception:
             pass
 
@@ -439,12 +425,12 @@ class KeypointList(list):
         return not self._finalizer.alive
 
     def free(self) -> None:
-        """Release the underlying ``SiftData`` GPU/host memory."""
+        """Release the underlying ``cusift_keypoints`` GPU/host memory."""
         # finalize.__call__ runs the cleanup atomically and marks it inactive;
         # subsequent calls are no-ops.
         self._finalizer()
 
-    def __enter__(self) -> "KeypointList":
+    def __enter__(self) -> "Keypoints":
         return self
 
     def __exit__(self, *exc) -> None:
@@ -473,56 +459,62 @@ class CuSift:
     def __init__(self, dll_path: Optional[Union[str, Path]] = None):
         self._lib = load_library(dll_path)
         self._error_cb = None  # keeps the ctypes callback object alive while registered
-        self._lib.InitializeCudaSift()
+        self._lib.cusift_init()
         _check_error(self._lib)
 
-    # -- Error sinks ------------------------------------------------------
+    # -- Version and error sinks --------------------------------------------
+
+    def version(self) -> tuple[int, int, int]:
+        """(major, minor, patch) of the loaded library (C ``cusift_version``)."""
+        major, minor, patch = c_int(0), c_int(0), c_int(0)
+        self._lib.cusift_version(byref(major), byref(minor), byref(patch))
+        return major.value, minor.value, patch.value
 
     def set_error_log(self, path: Optional[Union[str, Path]] = "", max_bytes: int = 0) -> None:
         """Append every library error and warning to a file.
 
-        Calls the C ``CusiftSetErrorLog`` function.  ``path=None`` turns the
+        Calls the C ``cusift_set_error_log`` function.  ``path=None`` turns the
         file off, ``""`` (the default) uses ``<temp dir>/cusift-errors.log``,
         anything else is the file to append to.  ``max_bytes`` is the rotation
         cap (0 = 1 MiB): when exceeded the file is renamed to ``<path>.1`` and
         restarted.  Logging never raises and never affects the call being logged.
         """
         if path is None:
-            self._lib.CusiftSetErrorLog(None, 0)
+            self._lib.cusift_set_error_log(None, 0)
         else:
-            self._lib.CusiftSetErrorLog(str(path).encode("utf-8"), int(max_bytes))
+            self._lib.cusift_set_error_log(str(path).encode("utf-8"), int(max_bytes))
 
     def set_error_callback(self, callback: Optional[Callable[[ErrorRecord], None]]) -> None:
         """Deliver every library error and warning to *callback* as well.
 
-        Calls the C ``CusiftSetErrorCallback`` function.  The callback receives
+        Calls the C ``cusift_set_error_callback`` function.  The callback receives
         an :class:`ErrorRecord` and runs on the thread where the error occurred.
         An exception raised inside it is printed by ctypes and otherwise
         ignored.  Pass ``None`` to remove the callback.  Process-wide: the last
         registration wins, whichever :class:`CuSift` instance made it.
         """
         if callback is None:
-            self._lib.CusiftSetErrorCallback(CusiftErrorCallback_t(0), None)
+            self._lib.cusift_set_error_callback(cusift_error_callback(0), None)
             self._error_cb = None
             return
 
         def trampoline(rec_ptr, _user):
             callback(ErrorRecord._from_ctypes(rec_ptr.contents))
 
-        cb = CusiftErrorCallback_t(trampoline)
-        self._lib.CusiftSetErrorCallback(cb, None)
+        cb = cusift_error_callback(trampoline)
+        self._lib.cusift_set_error_callback(cb, None)
         self._error_cb = cb
 
-    def error_log_dropped_count(self) -> int:
+    def error_log_dropped(self) -> int:
         """Number of log records that could not be written to the error log."""
-        return int(self._lib.CusiftErrorLogDroppedCount())
+        return int(self._lib.cusift_error_log_dropped())
 
     def reset_device(self) -> None:
         """Recover from a sticky CUDA error by resetting this process's context.
 
-        Calls the C ``CusiftResetDevice`` function.  The reset is process-local
+        Calls the C ``cusift_device_reset`` function.  The reset is process-local
         (other processes sharing the GPU are unaffected), but it destroys every
-        device allocation of this process: free every :class:`KeypointList`
+        device allocation of this process: free every :class:`Keypoints`
         first and do not reuse any GPU-resident result afterwards.
 
         Raises
@@ -530,7 +522,7 @@ class CuSift:
         CuSiftError
             If the device is still unusable after the reset.
         """
-        self._lib.CusiftResetDevice()
+        self._lib.cusift_device_reset()
         _check_error(self._lib)
 
     # -- Feature extraction -----------------------------------------------
@@ -542,7 +534,7 @@ class CuSift:
         width: Optional[int] = None,
         height: Optional[int] = None,
         options: Optional[ExtractOptions] = None,
-    ) -> KeypointList:
+    ) -> Keypoints:
         """Extract SIFT keypoints from an image.
 
         Parameters
@@ -560,9 +552,9 @@ class CuSift:
 
         Returns
         -------
-        KeypointList
+        Keypoints
             Detected SIFT features (behaves like ``list[Keypoint]``).
-            Retains the underlying ``SiftData`` so it can be passed
+            Retains the underlying ``cusift_keypoints`` so it can be passed
             directly to :meth:`match`.
 
         Raises
@@ -575,11 +567,11 @@ class CuSift:
 
         # -- Build ctypes arguments ---------------------------------------
         img_ct, _pixels_ref = _make_image_t(pixels, w, h)
-        sift_data = SiftData()
+        sift_data = cusift_keypoints()
         opts_ct = (options or ExtractOptions())._to_ctypes()
 
         # -- Call the C function ------------------------------------------
-        self._lib.ExtractSiftFromImage(
+        self._lib.cusift_extract(
             byref(img_ct), byref(sift_data), byref(opts_ct)
         )
         try:
@@ -587,27 +579,27 @@ class CuSift:
 
             # -- Convert results ------------------------------------------
             keypoints: List[Keypoint] = []
-            for i in range(sift_data.numPts):
-                keypoints.append(Keypoint._from_sift_point(sift_data.h_data[i]))
+            for i in range(sift_data.count):
+                keypoints.append(Keypoint._from_sift_point(sift_data.host[i]))
 
-            # Wrap in KeypointList (owns the SiftData; freed on GC or .free())
-            return KeypointList(keypoints, sift_data, self._lib)
+            # Wrap in Keypoints (owns the cusift_keypoints; freed on GC or .free())
+            return Keypoints(keypoints, sift_data, self._lib)
         except:
-            self._lib.DeleteSiftData(byref(sift_data))
+            self._lib.cusift_keypoints_free(byref(sift_data))
             raise
 
     # -- Feature matching -------------------------------------------------
 
     def match(
         self,
-        kp1: KeypointList,
-        kp2: KeypointList,
+        kp1: Keypoints,
+        kp2: Keypoints,
     ) -> List[MatchResult]:
         """Match SIFT features between two keypoint sets.
 
-        Calls the C ``MatchSiftData`` function.  Match results are written
+        Calls the C ``cusift_match`` function.  Match results are written
         into the ``match``, ``match_xpos``, ``match_ypos``, and
-        ``match_error`` fields of *kp1*'s underlying ``SiftData``.  This
+        ``match_error`` fields of *kp1*'s underlying ``cusift_keypoints``.  This
         method then reads those fields back and returns a list of
         :class:`MatchResult` for every keypoint in *kp1* that was
         successfully matched (``match >= 0``).
@@ -618,9 +610,9 @@ class CuSift:
 
         Parameters
         ----------
-        kp1 : KeypointList
+        kp1 : Keypoints
             Query keypoints (returned by :meth:`extract`).
-        kp2 : KeypointList
+        kp2 : Keypoints
             Target keypoints (returned by :meth:`extract`).
 
         Returns
@@ -634,19 +626,19 @@ class CuSift:
         CuSiftError
             If the underlying C library reports an error.
         TypeError
-            If *kp1* or *kp2* are not :class:`KeypointList` instances.
+            If *kp1* or *kp2* are not :class:`Keypoints` instances.
         """
-        if not isinstance(kp1, KeypointList) or not isinstance(kp2, KeypointList):
+        if not isinstance(kp1, Keypoints) or not isinstance(kp2, Keypoints):
             raise TypeError(
-                "match() requires KeypointList objects returned by extract()"
+                "match() requires Keypoints objects returned by extract()"
             )
         if kp1._freed or kp2._freed:
             raise RuntimeError(
-                "Cannot match: underlying SiftData has been freed"
+                "Cannot match: underlying cusift_keypoints has been freed"
             )
 
         # -- Call the C function ------------------------------------------
-        self._lib.MatchSiftData(
+        self._lib.cusift_match(
             byref(kp1._sift_data), byref(kp2._sift_data)
         )
         _check_error(self._lib)
@@ -654,12 +646,12 @@ class CuSift:
         # -- Read back results and build MatchResult list -----------------
         results: List[MatchResult] = []
         sd = kp1._sift_data
-        for i in range(sd.numPts):
-            pt = sd.h_data[i]
+        for i in range(sd.count):
+            pt = sd.host[i]
             # Update the Python-side Keypoint as well
             kp1[i].match = pt.match
-            kp1[i].match_x = pt.match_xpos
-            kp1[i].match_y = pt.match_ypos
+            kp1[i].match_x = pt.match_x
+            kp1[i].match_y = pt.match_y
             kp1[i].match_error = pt.match_error
             kp1[i].score = pt.score
             kp1[i].ambiguity = pt.ambiguity
@@ -669,10 +661,10 @@ class CuSift:
                     MatchResult(
                         query_index=i,
                         match_index=pt.match,
-                        x1=pt.xpos,
-                        y1=pt.ypos,
-                        x2=pt.match_xpos,
-                        y2=pt.match_ypos,
+                        x1=pt.x,
+                        y1=pt.y,
+                        x2=pt.match_x,
+                        y2=pt.match_y,
                         error=pt.match_error,
                         score=pt.score,
                         ambiguity=pt.ambiguity,
@@ -683,21 +675,21 @@ class CuSift:
 
     # -- Homography estimation --------------------------------------------
 
-    def find_homography(
+    def estimate_homography(
         self,
-        kp: KeypointList,
+        kp: Keypoints,
         *,
         options: Optional[HomographyOptions] = None,
     ) -> tuple[np.ndarray, int]:
         """Estimate a homography from matched SIFT features.
 
-        Calls the C ``FindHomography`` function.  The keypoints in *kp*
+        Calls the C ``cusift_estimate_homography`` function.  The keypoints in *kp*
         must already contain valid match information (i.e. you should call
         :meth:`match` first).
 
         Parameters
         ----------
-        kp : KeypointList
+        kp : Keypoints
             Keypoints with match data (returned by :meth:`extract`,
             after calling :meth:`match`).
         options : HomographyOptions, optional
@@ -716,15 +708,15 @@ class CuSift:
         CuSiftError
             If the underlying C library reports an error.
         TypeError
-            If *kp* is not a :class:`KeypointList`.
+            If *kp* is not a :class:`Keypoints`.
         """
-        if not isinstance(kp, KeypointList):
+        if not isinstance(kp, Keypoints):
             raise TypeError(
-                "find_homography() requires a KeypointList returned by extract()"
+                "estimate_homography() requires a Keypoints returned by extract()"
             )
         if kp._freed:
             raise RuntimeError(
-                "Cannot find homography: underlying SiftData has been freed"
+                "Cannot find homography: underlying cusift_keypoints has been freed"
             )
 
         # -- Build ctypes arguments ---------------------------------------
@@ -733,7 +725,7 @@ class CuSift:
         opts_ct = (options or HomographyOptions())._to_ctypes()
 
         # -- Call the C function ------------------------------------------
-        self._lib.FindHomography(
+        self._lib.cusift_estimate_homography(
             byref(kp._sift_data),
             homography,
             byref(num_matches),
@@ -748,7 +740,7 @@ class CuSift:
 
     # -- Image warping ----------------------------------------------------
 
-    def warp_images(
+    def warp(
         self,
         image1: Union[str, Path, np.ndarray],
         image2: Union[str, Path, np.ndarray],
@@ -762,8 +754,8 @@ class CuSift:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Warp two images using a homography so they are aligned.
 
-        Calls the C ``WarpImages`` function.  The homography should be
-        the output of :meth:`find_homography`.
+        Calls the C ``cusift_warp`` function.  The homography should be
+        the output of :meth:`estimate_homography`.
 
         Parameters
         ----------
@@ -807,11 +799,11 @@ class CuSift:
             )
         h_ct = H_flat.ctypes.data_as(POINTER(c_float))
 
-        warped1_ct = Image_t()
-        warped2_ct = Image_t()
+        warped1_ct = cusift_image()
+        warped2_ct = cusift_image()
 
         # -- Call the C function ------------------------------------------
-        self._lib.WarpImages(
+        self._lib.cusift_warp(
             byref(img1_ct),
             byref(img2_ct),
             h_ct,
@@ -821,39 +813,39 @@ class CuSift:
         )
 
         # -- Copy warped pixels into numpy arrays -------------------------
-        #    The C library allocates warped_image.host_img_ with malloc();
-        #    we copy the data and then free the C-side buffer via FreeImage().
-        #    FreeImage() is a no-op when host_img_ is NULL, so it is safe to
+        #    The C library allocates warped_image.pixels with malloc();
+        #    we copy the data and then free the C-side buffer via cusift_image_free().
+        #    cusift_image_free() is a no-op when pixels is NULL, so it is safe to
         #    call unconditionally even if the C call errored out.
         try:
             _check_error(self._lib)
 
-            n1 = warped1_ct.width_ * warped1_ct.height_
-            n2 = warped2_ct.width_ * warped2_ct.height_
+            n1 = warped1_ct.width * warped1_ct.height
+            n2 = warped2_ct.width * warped2_ct.height
 
-            warped1 = np.ctypeslib.as_array(warped1_ct.host_img_, shape=(n1,)).copy()
-            warped1 = warped1.reshape(warped1_ct.height_, warped1_ct.width_)
+            warped1 = np.ctypeslib.as_array(warped1_ct.pixels, shape=(n1,)).copy()
+            warped1 = warped1.reshape(warped1_ct.height, warped1_ct.width)
 
-            warped2 = np.ctypeslib.as_array(warped2_ct.host_img_, shape=(n2,)).copy()
-            warped2 = warped2.reshape(warped2_ct.height_, warped2_ct.width_)
+            warped2 = np.ctypeslib.as_array(warped2_ct.pixels, shape=(n2,)).copy()
+            warped2 = warped2.reshape(warped2_ct.height, warped2_ct.width)
 
             return warped1, warped2
         finally:
             # Free the C-allocated pixel buffers via the library's own free
-            self._lib.FreeImage(byref(warped1_ct))
-            self._lib.FreeImage(byref(warped2_ct))
+            self._lib.cusift_image_free(byref(warped1_ct))
+            self._lib.cusift_image_free(byref(warped2_ct))
 
-    def compute_warp_geometry(
+    def compute_canvas(
         self,
         homography: np.ndarray,
         width1: int,
         height1: int,
         width2: int,
         height2: int,
-    ) -> WarpGeometry:
-        """Compute the canvas that :meth:`warp_images` would produce, without warping.
+    ) -> Canvas:
+        """Compute the canvas that :meth:`warp` would produce, without warping.
 
-        Calls the C ``ComputeWarpGeometry`` function: a constant-time,
+        Calls the C ``cusift_compute_canvas`` function: a constant-time,
         host-only computation that reports the canvas size, its origin in
         image-1 coordinates, and where the four corners of each input land
         on the canvas.  The values are exactly those the warp uses.
@@ -862,7 +854,7 @@ class CuSift:
         ----------
         homography : numpy.ndarray
             A ``(3, 3)`` homography matrix (image 1 to image 2), as returned
-            by :meth:`find_homography`.
+            by :meth:`estimate_homography`.
         width1, height1 : int
             Size of image 1 in pixels.
         width2, height2 : int
@@ -870,7 +862,7 @@ class CuSift:
 
         Returns
         -------
-        WarpGeometry
+        Canvas
 
         Raises
         ------
@@ -887,9 +879,9 @@ class CuSift:
                 f"homography must have 9 elements (3x3), got shape {np.shape(homography)}"
             )
         h_ct = H_flat.ctypes.data_as(POINTER(c_float))
-        geom_ct = WarpGeometry_t()
+        geom_ct = cusift_canvas()
 
-        self._lib.ComputeWarpGeometry(
+        self._lib.cusift_compute_canvas(
             h_ct,
             c_int(int(width1)), c_int(int(height1)),
             c_int(int(width2)), c_int(int(height2)),
@@ -898,9 +890,9 @@ class CuSift:
         try:
             _check_error(self._lib)
         except CuSiftError as err:
-            err.geometry = WarpGeometry._from_ctypes(geom_ct)  # type: ignore[attr-defined]
+            err.geometry = Canvas._from_ctypes(geom_ct)  # type: ignore[attr-defined]
             raise
-        return WarpGeometry._from_ctypes(geom_ct)
+        return Canvas._from_ctypes(geom_ct)
 
     # -- Convenience combo pipelines --------------------------------------
 
@@ -914,10 +906,10 @@ class CuSift:
         width2: Optional[int] = None,
         height2: Optional[int] = None,
         options: Optional[ExtractOptions] = None,
-    ) -> tuple[KeypointList, KeypointList, List[MatchResult]]:
+    ) -> tuple[Keypoints, Keypoints, List[MatchResult]]:
         """Extract SIFT features from two images and match them in one call.
 
-        This is a convenience wrapper around the C ``ExtractAndMatchSift``
+        This is a convenience wrapper around the C ``cusift_extract_and_match``
         function, which fuses :meth:`extract` and :meth:`match` into a
         single GPU-accelerated pipeline call, avoiding an extra
         host ↔ device round-trip.
@@ -938,12 +930,12 @@ class CuSift:
 
         Returns
         -------
-        (kp1, kp2, matches) : tuple[KeypointList, KeypointList, list[MatchResult]]
+        (kp1, kp2, matches) : tuple[Keypoints, Keypoints, list[MatchResult]]
             *kp1* and *kp2* are the keypoints extracted from each image.
             *matches* contains one :class:`MatchResult` per successfully
             matched correspondence (unmatched keypoints are omitted).
-            Both ``KeypointList`` objects own their underlying
-            ``SiftData``; call ``.free()`` or use them as context managers
+            Both ``Keypoints`` objects own their underlying
+            ``cusift_keypoints``; call ``.free()`` or use them as context managers
             to release GPU memory early.
 
         Raises
@@ -958,12 +950,12 @@ class CuSift:
         # -- Build ctypes arguments ---------------------------------------
         img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
         img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
-        sift_data1 = SiftData()
-        sift_data2 = SiftData()
+        sift_data1 = cusift_keypoints()
+        sift_data2 = cusift_keypoints()
         opts_ct = (options or ExtractOptions())._to_ctypes()
 
         # -- Call the C function ------------------------------------------
-        self._lib.ExtractAndMatchSift(
+        self._lib.cusift_extract_and_match(
             byref(img1_ct),
             byref(img2_ct),
             byref(sift_data1),
@@ -977,28 +969,28 @@ class CuSift:
 
             # -- Convert keypoints ----------------------------------------
             kps1: List[Keypoint] = []
-            for i in range(sift_data1.numPts):
-                kps1.append(Keypoint._from_sift_point(sift_data1.h_data[i]))
-            kp1 = KeypointList(kps1, sift_data1, self._lib)
+            for i in range(sift_data1.count):
+                kps1.append(Keypoint._from_sift_point(sift_data1.host[i]))
+            kp1 = Keypoints(kps1, sift_data1, self._lib)
 
             kps2: List[Keypoint] = []
-            for i in range(sift_data2.numPts):
-                kps2.append(Keypoint._from_sift_point(sift_data2.h_data[i]))
-            kp2 = KeypointList(kps2, sift_data2, self._lib)
+            for i in range(sift_data2.count):
+                kps2.append(Keypoint._from_sift_point(sift_data2.host[i]))
+            kp2 = Keypoints(kps2, sift_data2, self._lib)
 
             # -- Read back match results from sift_data1 ------------------
             matches: List[MatchResult] = []
-            for i in range(sift_data1.numPts):
-                pt = sift_data1.h_data[i]
+            for i in range(sift_data1.count):
+                pt = sift_data1.host[i]
                 if pt.match >= 0:
                     matches.append(
                         MatchResult(
                             query_index=i,
                             match_index=pt.match,
-                            x1=pt.xpos,
-                            y1=pt.ypos,
-                            x2=pt.match_xpos,
-                            y2=pt.match_ypos,
+                            x1=pt.x,
+                            y1=pt.y,
+                            x2=pt.match_x,
+                            y2=pt.match_y,
                             error=pt.match_error,
                             score=pt.score,
                             ambiguity=pt.ambiguity,
@@ -1010,14 +1002,40 @@ class CuSift:
             if kp1 is not None:
                 kp1.free()
             else:
-                self._lib.DeleteSiftData(byref(sift_data1))
+                self._lib.cusift_keypoints_free(byref(sift_data1))
             if kp2 is not None:
                 kp2.free()
             else:
-                self._lib.DeleteSiftData(byref(sift_data2))
+                self._lib.cusift_keypoints_free(byref(sift_data2))
             raise
 
-    def extract_and_match_and_find_homography(
+    def _collect_pair(self, sift_data1, sift_data2):
+        """Wrap two filled keypoint sets; free them if anything goes wrong."""
+        kp1 = kp2 = None
+        try:
+            _check_error(self._lib)
+            kp1 = Keypoints([Keypoint._from_sift_point(sift_data1.host[i]) for i in range(sift_data1.count)], sift_data1, self._lib)
+            kp2 = Keypoints([Keypoint._from_sift_point(sift_data2.host[i]) for i in range(sift_data2.count)], sift_data2, self._lib)
+            matches: List[MatchResult] = []
+            for i in range(sift_data1.count):
+                pt = sift_data1.host[i]
+                if pt.match >= 0:
+                    matches.append(MatchResult(query_index=i, match_index=pt.match, x1=pt.x, y1=pt.y,
+                                               x2=pt.match_x, y2=pt.match_y, error=pt.match_error,
+                                               score=pt.score, ambiguity=pt.ambiguity))
+            return kp1, kp2, matches
+        except BaseException:
+            if kp1 is not None:
+                kp1.free()
+            else:
+                self._lib.cusift_keypoints_free(byref(sift_data1))
+            if kp2 is not None:
+                kp2.free()
+            else:
+                self._lib.cusift_keypoints_free(byref(sift_data2))
+            raise
+
+    def align(
         self,
         image1: Union[str, Path, np.ndarray],
         image2: Union[str, Path, np.ndarray],
@@ -1028,121 +1046,45 @@ class CuSift:
         height2: Optional[int] = None,
         extract_options: Optional[ExtractOptions] = None,
         homography_options: Optional[HomographyOptions] = None,
-    ) -> tuple[KeypointList, KeypointList, List[MatchResult], np.ndarray, int]:
-        """Extract, match, and find a homography in one GPU-accelerated call.
+    ) -> tuple[Keypoints, Keypoints, List[MatchResult], np.ndarray, int]:
+        """Extract, match and estimate the homography from image 1 to image 2.
 
-        This is a convenience wrapper around the C
-        ``ExtractAndMatchAndFindHomography`` function, which fuses
-        :meth:`extract`, :meth:`match`, and :meth:`find_homography` into
-        a single pipeline call.
-
-        Parameters
-        ----------
-        image1 : str | Path | numpy.ndarray
-            First image (file path or 2-D ``float32`` array).
-        image2 : str | Path | numpy.ndarray
-            Second image (file path or 2-D ``float32`` array).
-        width1, height1 : int, optional
-            Dimension overrides for *image1* (only needed for 1-D arrays).
-        width2, height2 : int, optional
-            Dimension overrides for *image2* (only needed for 1-D arrays).
-        extract_options : ExtractOptions, optional
-            Extraction parameters applied to *both* images.  Uses
-            :class:`ExtractOptions` defaults when not provided.
-        homography_options : HomographyOptions, optional
-            RANSAC / refinement parameters.  Uses
-            :class:`HomographyOptions` defaults when not provided.
+        Calls the C ``cusift_align`` function.  Several attempts and the
+        selection goal are set through ``homography_options`` (``attempts``,
+        ``goal``).
 
         Returns
         -------
         (kp1, kp2, matches, homography, num_inliers)
-            *kp1* and *kp2* are :class:`KeypointList` objects.
-            *matches* contains one :class:`MatchResult` per successful
-            correspondence.  *homography* is a ``(3, 3)`` float32 array.
-            *num_inliers* is the inlier count used to compute the
-            homography.
+            The keypoints of each image (free them with ``.free()``), the
+            match list, the ``(3, 3)`` float32 homography and the RANSAC
+            inlier count.
 
         Raises
         ------
         CuSiftError
             If the underlying C library reports an error.
         """
-        # -- Resolve pixel data -------------------------------------------
         pix1, w1, h1 = _resolve_image_arg(image1, width1, height1, "image1")
         pix2, w2, h2 = _resolve_image_arg(image2, width2, height2, "image2")
-
-        # -- Build ctypes arguments ---------------------------------------
         img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
         img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
-        sift_data1 = SiftData()
-        sift_data2 = SiftData()
-        homography = (c_float * 9)()
-        num_matches = c_int(0)
+        sift_data1 = cusift_keypoints()
+        sift_data2 = cusift_keypoints()
         ext_ct = (extract_options or ExtractOptions())._to_ctypes()
         hom_ct = (homography_options or HomographyOptions())._to_ctypes()
+        homography = (c_float * 9)()
+        inliers = c_int(0)
 
-        # -- Call the C function ------------------------------------------
-        self._lib.ExtractAndMatchAndFindHomography(
-            byref(img1_ct),
-            byref(img2_ct),
-            byref(sift_data1),
-            byref(sift_data2),
-            homography,
-            byref(num_matches),
-            byref(ext_ct),
-            byref(hom_ct),
+        self._lib.cusift_align(
+            byref(img1_ct), byref(img2_ct), byref(sift_data1), byref(sift_data2),
+            byref(ext_ct), byref(hom_ct), homography, byref(inliers),
         )
-        kp1 = None
-        kp2 = None
-        try:
-            _check_error(self._lib)
+        kp1, kp2, matches = self._collect_pair(sift_data1, sift_data2)
+        H = np.ctypeslib.as_array(homography, shape=(9,)).copy().reshape(3, 3)
+        return kp1, kp2, matches, H, inliers.value
 
-            # -- Convert keypoints ----------------------------------------
-            kps1: List[Keypoint] = []
-            for i in range(sift_data1.numPts):
-                kps1.append(Keypoint._from_sift_point(sift_data1.h_data[i]))
-            kp1 = KeypointList(kps1, sift_data1, self._lib)
-
-            kps2: List[Keypoint] = []
-            for i in range(sift_data2.numPts):
-                kps2.append(Keypoint._from_sift_point(sift_data2.h_data[i]))
-            kp2 = KeypointList(kps2, sift_data2, self._lib)
-
-            # -- Read back match results from sift_data1 ------------------
-            matches: List[MatchResult] = []
-            for i in range(sift_data1.numPts):
-                pt = sift_data1.h_data[i]
-                if pt.match >= 0:
-                    matches.append(
-                        MatchResult(
-                            query_index=i,
-                            match_index=pt.match,
-                            x1=pt.xpos,
-                            y1=pt.ypos,
-                            x2=pt.match_xpos,
-                            y2=pt.match_ypos,
-                            error=pt.match_error,
-                            score=pt.score,
-                            ambiguity=pt.ambiguity,
-                        )
-                    )
-
-            # -- Convert homography to numpy ------------------------------
-            H = np.ctypeslib.as_array(homography, shape=(9,)).copy().reshape(3, 3)
-
-            return kp1, kp2, matches, H, num_matches.value
-        except:
-            if kp1 is not None:
-                kp1.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is not None:
-                kp2.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data2))
-            raise
-
-    def extract_and_match_and_find_homography_multi(
+    def align_and_warp(
         self,
         image1: Union[str, Path, np.ndarray],
         image2: Union[str, Path, np.ndarray],
@@ -1153,441 +1095,59 @@ class CuSift:
         height2: Optional[int] = None,
         extract_options: Optional[ExtractOptions] = None,
         homography_options: Optional[HomographyOptions] = None,
-        num_homography_attempts: int = 5,
-        homography_goal: int = HOMOGRAPHY_GOAL_MAX_INLIERS,
-    ) -> tuple[KeypointList, KeypointList, List[MatchResult], np.ndarray, int]:
-        """Extract, match, and find the best homography over multiple attempts.
+    ) -> tuple[Keypoints, Keypoints, List[MatchResult], np.ndarray, int, np.ndarray, np.ndarray]:
+        """:meth:`align` followed by the GPU warp of both images onto the common canvas.
 
-        This wraps the C ``ExtractAndMatchAndFindHomography_Multi`` function.
-        It runs :meth:`extract`, :meth:`match`, and :meth:`find_homography`
-        in a single GPU-accelerated call, repeating the homography estimation
-        *num_homography_attempts* times with different random seeds and
-        returning the best result according to *homography_goal*.
-
-        Parameters
-        ----------
-        image1 : str | Path | numpy.ndarray
-            First image (file path or 2-D ``float32`` array).
-        image2 : str | Path | numpy.ndarray
-            Second image (file path or 2-D ``float32`` array).
-        width1, height1 : int, optional
-            Dimension overrides for *image1* (only needed for 1-D arrays).
-        width2, height2 : int, optional
-            Dimension overrides for *image2* (only needed for 1-D arrays).
-        extract_options : ExtractOptions, optional
-            Extraction parameters applied to *both* images.  Uses
-            :class:`ExtractOptions` defaults when not provided.
-        homography_options : HomographyOptions, optional
-            RANSAC / refinement parameters.  Uses
-            :class:`HomographyOptions` defaults when not provided.
-        num_homography_attempts : int
-            Number of homography estimation attempts (default 5).
-            Each attempt uses a different random seed.  The best
-            result is returned.
-        homography_goal : int
-            Selection criterion.  Use :data:`HOMOGRAPHY_GOAL_MAX_INLIERS`
-            (default) to pick the homography with the most inliers, or
-            :data:`HOMOGRAPHY_GOAL_MIN_EYE_DIFF` to prefer homographies
-            whose top-left 2x2 block is closest to the identity.
-
-        Returns
-        -------
-        (kp1, kp2, matches, homography, num_inliers)
-            *kp1* and *kp2* are :class:`KeypointList` objects.
-            *matches* contains one :class:`MatchResult` per successful
-            correspondence.  *homography* is a ``(3, 3)`` float32 array.
-            *num_inliers* is the inlier count of the best homography.
-
-        Raises
-        ------
-        CuSiftError
-            If the underlying C library reports an error.
-        """
-        # -- Resolve pixel data -------------------------------------------
-        pix1, w1, h1 = _resolve_image_arg(image1, width1, height1, "image1")
-        pix2, w2, h2 = _resolve_image_arg(image2, width2, height2, "image2")
-
-        # -- Build ctypes arguments ---------------------------------------
-        img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
-        img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
-        sift_data1 = SiftData()
-        sift_data2 = SiftData()
-        homography = (c_float * 9)()
-        num_matches = c_int(0)
-        ext_ct = (extract_options or ExtractOptions())._to_ctypes()
-        hom_ct = (homography_options or HomographyOptions())._to_ctypes()
-
-        # -- Call the C function ------------------------------------------
-        self._lib.ExtractAndMatchAndFindHomography_Multi(
-            byref(img1_ct),
-            byref(img2_ct),
-            byref(sift_data1),
-            byref(sift_data2),
-            homography,
-            byref(num_matches),
-            byref(ext_ct),
-            byref(hom_ct),
-            c_int(num_homography_attempts),
-            c_int(homography_goal),
-        )
-        kp1 = None
-        kp2 = None
-        try:
-            _check_error(self._lib)
-
-            # -- Convert keypoints ----------------------------------------
-            kps1: List[Keypoint] = []
-            for i in range(sift_data1.numPts):
-                kps1.append(Keypoint._from_sift_point(sift_data1.h_data[i]))
-            kp1 = KeypointList(kps1, sift_data1, self._lib)
-
-            kps2: List[Keypoint] = []
-            for i in range(sift_data2.numPts):
-                kps2.append(Keypoint._from_sift_point(sift_data2.h_data[i]))
-            kp2 = KeypointList(kps2, sift_data2, self._lib)
-
-            # -- Read back match results from sift_data1 ------------------
-            matches: List[MatchResult] = []
-            for i in range(sift_data1.numPts):
-                pt = sift_data1.h_data[i]
-                if pt.match >= 0:
-                    matches.append(
-                        MatchResult(
-                            query_index=i,
-                            match_index=pt.match,
-                            x1=pt.xpos,
-                            y1=pt.ypos,
-                            x2=pt.match_xpos,
-                            y2=pt.match_ypos,
-                            error=pt.match_error,
-                            score=pt.score,
-                            ambiguity=pt.ambiguity,
-                        )
-                    )
-
-            # -- Convert homography to numpy ------------------------------
-            H = np.ctypeslib.as_array(homography, shape=(9,)).copy().reshape(3, 3)
-
-            return kp1, kp2, matches, H, num_matches.value
-        except:
-            if kp1 is not None:
-                kp1.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is not None:
-                kp2.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data2))
-            raise
-
-    def extract_and_match_and_find_homography_and_warp(
-        self,
-        image1: Union[str, Path, np.ndarray],
-        image2: Union[str, Path, np.ndarray],
-        *,
-        width1: Optional[int] = None,
-        height1: Optional[int] = None,
-        width2: Optional[int] = None,
-        height2: Optional[int] = None,
-        extract_options: Optional[ExtractOptions] = None,
-        homography_options: Optional[HomographyOptions] = None,
-    ) -> tuple[KeypointList, KeypointList, List[MatchResult], np.ndarray, int, np.ndarray, np.ndarray]:
-        """Full pipeline: extract, match, find homography, and warp in one call.
-
-        This is a convenience wrapper around the C
-        ``ExtractAndMatchAndFindHomographyAndWarp`` function, which fuses
-        :meth:`extract`, :meth:`match`, :meth:`find_homography`, and
-        :meth:`warp_images` into a single GPU-accelerated pipeline call.
-
-        Parameters
-        ----------
-        image1 : str | Path | numpy.ndarray
-            First image (file path or 2-D ``float32`` array).
-        image2 : str | Path | numpy.ndarray
-            Second image (file path or 2-D ``float32`` array).
-        width1, height1 : int, optional
-            Dimension overrides for *image1* (only needed for 1-D arrays).
-        width2, height2 : int, optional
-            Dimension overrides for *image2* (only needed for 1-D arrays).
-        extract_options : ExtractOptions, optional
-            Extraction parameters applied to *both* images.  Uses
-            :class:`ExtractOptions` defaults when not provided.
-        homography_options : HomographyOptions, optional
-            RANSAC / refinement parameters.  Uses
-            :class:`HomographyOptions` defaults when not provided.
+        Calls the C ``cusift_align_and_warp`` function; the images uploaded
+        for extraction are reused as warp sources.
 
         Returns
         -------
         (kp1, kp2, matches, homography, num_inliers, warped1, warped2)
-            *kp1* and *kp2* are :class:`KeypointList` objects.
-            *matches* contains one :class:`MatchResult` per successful
-            correspondence.  *homography* is a ``(3, 3)`` float32 array.
-            *num_inliers* is the inlier count.  *warped1* and *warped2*
-            are 2-D ``float32`` arrays of the aligned images.
+            As :meth:`align`, plus the two ``float32`` canvases of equal shape
+            (NaN where no source covers a pixel).  The caller owns the arrays.
 
         Raises
         ------
         CuSiftError
             If the underlying C library reports an error.
         """
-        # -- Resolve pixel data -------------------------------------------
         pix1, w1, h1 = _resolve_image_arg(image1, width1, height1, "image1")
         pix2, w2, h2 = _resolve_image_arg(image2, width2, height2, "image2")
-
-        # -- Build ctypes arguments ---------------------------------------
         img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
         img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
-        sift_data1 = SiftData()
-        sift_data2 = SiftData()
-        homography = (c_float * 9)()
-        num_matches = c_int(0)
+        sift_data1 = cusift_keypoints()
+        sift_data2 = cusift_keypoints()
         ext_ct = (extract_options or ExtractOptions())._to_ctypes()
         hom_ct = (homography_options or HomographyOptions())._to_ctypes()
-        warped1_ct = Image_t()
-        warped2_ct = Image_t()
-
-        # -- Call the C function ------------------------------------------
-        self._lib.ExtractAndMatchAndFindHomographyAndWarp(
-            byref(img1_ct),
-            byref(img2_ct),
-            byref(sift_data1),
-            byref(sift_data2),
-            homography,
-            byref(num_matches),
-            byref(ext_ct),
-            byref(hom_ct),
-            byref(warped1_ct),
-            byref(warped2_ct),
-        )
-        kp1 = None
-        kp2 = None
-        try:
-            _check_error(self._lib)
-
-            # -- Convert keypoints ----------------------------------------
-            kps1: List[Keypoint] = []
-            for i in range(sift_data1.numPts):
-                kps1.append(Keypoint._from_sift_point(sift_data1.h_data[i]))
-            kp1 = KeypointList(kps1, sift_data1, self._lib)
-
-            kps2: List[Keypoint] = []
-            for i in range(sift_data2.numPts):
-                kps2.append(Keypoint._from_sift_point(sift_data2.h_data[i]))
-            kp2 = KeypointList(kps2, sift_data2, self._lib)
-
-            # -- Read back match results from sift_data1 ------------------
-            matches: List[MatchResult] = []
-            for i in range(sift_data1.numPts):
-                pt = sift_data1.h_data[i]
-                if pt.match >= 0:
-                    matches.append(
-                        MatchResult(
-                            query_index=i,
-                            match_index=pt.match,
-                            x1=pt.xpos,
-                            y1=pt.ypos,
-                            x2=pt.match_xpos,
-                            y2=pt.match_ypos,
-                            error=pt.match_error,
-                            score=pt.score,
-                            ambiguity=pt.ambiguity,
-                        )
-                    )
-
-            # -- Convert homography to numpy ------------------------------
-            H = np.ctypeslib.as_array(homography, shape=(9,)).copy().reshape(3, 3)
-
-            # -- Copy warped pixels into numpy arrays ---------------------
-            n1 = warped1_ct.width_ * warped1_ct.height_
-            n2 = warped2_ct.width_ * warped2_ct.height_
-
-            warped1 = np.ctypeslib.as_array(warped1_ct.host_img_, shape=(n1,)).copy()
-            warped1 = warped1.reshape(warped1_ct.height_, warped1_ct.width_)
-
-            warped2 = np.ctypeslib.as_array(warped2_ct.host_img_, shape=(n2,)).copy()
-            warped2 = warped2.reshape(warped2_ct.height_, warped2_ct.width_)
-
-            return kp1, kp2, matches, H, num_matches.value, warped1, warped2
-        except:
-            if kp1 is not None:
-                kp1.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is not None:
-                kp2.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data2))
-            raise
-        finally:
-            # FreeImage() is a no-op when host_img_ is NULL, so it is safe to
-            # call unconditionally even if the C call errored out.
-            self._lib.FreeImage(byref(warped1_ct))
-            self._lib.FreeImage(byref(warped2_ct))
-
-    def extract_and_match_and_find_homography_multi_and_warp(
-        self,
-        image1: Union[str, Path, np.ndarray],
-        image2: Union[str, Path, np.ndarray],
-        *,
-        width1: Optional[int] = None,
-        height1: Optional[int] = None,
-        width2: Optional[int] = None,
-        height2: Optional[int] = None,
-        extract_options: Optional[ExtractOptions] = None,
-        homography_options: Optional[HomographyOptions] = None,
-        num_homography_attempts: int = 5,
-        homography_goal: int = HOMOGRAPHY_GOAL_MAX_INLIERS,
-    ) -> tuple[KeypointList, KeypointList, List[MatchResult], np.ndarray, int, np.ndarray, np.ndarray]:
-        """Full pipeline with multi-attempt homography: extract, match, find the best homography, and warp.
-
-        This wraps the C ``ExtractAndMatchAndFindHomography_Multi_AndWarp``
-        function, which fuses :meth:`extract`, :meth:`match`,
-        :meth:`find_homography` (repeated *num_homography_attempts* times),
-        and :meth:`warp_images` into a single GPU-accelerated pipeline call.
-
-        Parameters
-        ----------
-        image1 : str | Path | numpy.ndarray
-            First image (file path or 2-D ``float32`` array).
-        image2 : str | Path | numpy.ndarray
-            Second image (file path or 2-D ``float32`` array).
-        width1, height1 : int, optional
-            Dimension overrides for *image1* (only needed for 1-D arrays).
-        width2, height2 : int, optional
-            Dimension overrides for *image2* (only needed for 1-D arrays).
-        extract_options : ExtractOptions, optional
-            Extraction parameters applied to *both* images.  Uses
-            :class:`ExtractOptions` defaults when not provided.
-        homography_options : HomographyOptions, optional
-            RANSAC / refinement parameters.  Uses
-            :class:`HomographyOptions` defaults when not provided.
-        num_homography_attempts : int
-            Number of homography estimation attempts (default 5).
-            Each attempt uses a different random seed.  The best
-            result is returned.
-        homography_goal : int
-            Selection criterion.  Use :data:`HOMOGRAPHY_GOAL_MAX_INLIERS`
-            (default) to pick the homography with the most inliers, or
-            :data:`HOMOGRAPHY_GOAL_MIN_EYE_DIFF` to prefer homographies
-            whose top-left 2x2 block is closest to the identity.
-
-        Returns
-        -------
-        (kp1, kp2, matches, homography, num_inliers, warped1, warped2)
-            *kp1* and *kp2* are :class:`KeypointList` objects.
-            *matches* contains one :class:`MatchResult` per successful
-            correspondence.  *homography* is a ``(3, 3)`` float32 array.
-            *num_inliers* is the inlier count of the best homography.
-            *warped1* and *warped2* are 2-D ``float32`` arrays of the
-            aligned images.
-
-        Raises
-        ------
-        CuSiftError
-            If the underlying C library reports an error.
-        """
-        # -- Resolve pixel data -------------------------------------------
-        pix1, w1, h1 = _resolve_image_arg(image1, width1, height1, "image1")
-        pix2, w2, h2 = _resolve_image_arg(image2, width2, height2, "image2")
-
-        # -- Build ctypes arguments ---------------------------------------
-        img1_ct, _pix1_ref = _make_image_t(pix1, w1, h1)
-        img2_ct, _pix2_ref = _make_image_t(pix2, w2, h2)
-        sift_data1 = SiftData()
-        sift_data2 = SiftData()
         homography = (c_float * 9)()
-        num_matches = c_int(0)
-        ext_ct = (extract_options or ExtractOptions())._to_ctypes()
-        hom_ct = (homography_options or HomographyOptions())._to_ctypes()
-        warped1_ct = Image_t()
-        warped2_ct = Image_t()
+        inliers = c_int(0)
+        warped1_ct = cusift_image()
+        warped2_ct = cusift_image()
 
-        # -- Call the C function ------------------------------------------
-        self._lib.ExtractAndMatchAndFindHomography_Multi_AndWarp(
-            byref(img1_ct),
-            byref(img2_ct),
-            byref(sift_data1),
-            byref(sift_data2),
-            homography,
-            byref(num_matches),
-            byref(ext_ct),
-            byref(hom_ct),
-            byref(warped1_ct),
-            byref(warped2_ct),
-            c_int(num_homography_attempts),
-            c_int(homography_goal),
+        self._lib.cusift_align_and_warp(
+            byref(img1_ct), byref(img2_ct), byref(sift_data1), byref(sift_data2),
+            byref(ext_ct), byref(hom_ct), homography, byref(inliers),
+            byref(warped1_ct), byref(warped2_ct),
         )
-        kp1 = None
-        kp2 = None
         try:
-            _check_error(self._lib)
-
-            # -- Convert keypoints ----------------------------------------
-            kps1: List[Keypoint] = []
-            for i in range(sift_data1.numPts):
-                kps1.append(Keypoint._from_sift_point(sift_data1.h_data[i]))
-            kp1 = KeypointList(kps1, sift_data1, self._lib)
-
-            kps2: List[Keypoint] = []
-            for i in range(sift_data2.numPts):
-                kps2.append(Keypoint._from_sift_point(sift_data2.h_data[i]))
-            kp2 = KeypointList(kps2, sift_data2, self._lib)
-
-            # -- Read back match results from sift_data1 ------------------
-            matches: List[MatchResult] = []
-            for i in range(sift_data1.numPts):
-                pt = sift_data1.h_data[i]
-                if pt.match >= 0:
-                    matches.append(
-                        MatchResult(
-                            query_index=i,
-                            match_index=pt.match,
-                            x1=pt.xpos,
-                            y1=pt.ypos,
-                            x2=pt.match_xpos,
-                            y2=pt.match_ypos,
-                            error=pt.match_error,
-                            score=pt.score,
-                            ambiguity=pt.ambiguity,
-                        )
-                    )
-
-            # -- Convert homography to numpy ------------------------------
+            kp1, kp2, matches = self._collect_pair(sift_data1, sift_data2)
             H = np.ctypeslib.as_array(homography, shape=(9,)).copy().reshape(3, 3)
-
-            # -- Copy warped pixels into numpy arrays ---------------------
-            n1 = warped1_ct.width_ * warped1_ct.height_
-            n2 = warped2_ct.width_ * warped2_ct.height_
-
-            warped1 = np.ctypeslib.as_array(warped1_ct.host_img_, shape=(n1,)).copy()
-            warped1 = warped1.reshape(warped1_ct.height_, warped1_ct.width_)
-
-            warped2 = np.ctypeslib.as_array(warped2_ct.host_img_, shape=(n2,)).copy()
-            warped2 = warped2.reshape(warped2_ct.height_, warped2_ct.width_)
-
-            return kp1, kp2, matches, H, num_matches.value, warped1, warped2
-        except:
-            if kp1 is not None:
-                kp1.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data1))
-            if kp2 is not None:
-                kp2.free()
-            else:
-                self._lib.DeleteSiftData(byref(sift_data2))
-            raise
+            n1 = warped1_ct.width * warped1_ct.height
+            n2 = warped2_ct.width * warped2_ct.height
+            warped1 = np.ctypeslib.as_array(warped1_ct.pixels, shape=(n1,)).copy().reshape(warped1_ct.height, warped1_ct.width)
+            warped2 = np.ctypeslib.as_array(warped2_ct.pixels, shape=(n2,)).copy().reshape(warped2_ct.height, warped2_ct.width)
+            return kp1, kp2, matches, H, inliers.value, warped1, warped2
         finally:
-            # FreeImage() is a no-op when host_img_ is NULL, so it is safe to
-            # call unconditionally even if the C call errored out.
-            self._lib.FreeImage(byref(warped1_ct))
-            self._lib.FreeImage(byref(warped2_ct))
+            self._lib.cusift_image_free(byref(warped1_ct))
+            self._lib.cusift_image_free(byref(warped2_ct))
 
     # -- Visualisation ----------------------------------------------------
 
     @staticmethod
     def draw_keypoints(
         image: Union[str, Path, np.ndarray],
-        keypoints: KeypointList,
+        keypoints: Keypoints,
         output: Union[str, Path],
         *,
         radius_scale: float = 3.0,
@@ -1608,7 +1168,7 @@ class CuSift:
         ----------
         image : str | Path | numpy.ndarray
             Source image (file path or 2-D float32 array).
-        keypoints : KeypointList
+        keypoints : Keypoints
             Keypoints to draw (returned by :meth:`extract`).
         output : str | Path
             File path for the annotated image (e.g. ``"features.png"``).
@@ -1766,7 +1326,7 @@ class CuSift:
     @staticmethod
     def draw_descriptors(
         image: Union[str, Path, np.ndarray],
-        keypoints: KeypointList,
+        keypoints: Keypoints,
         min_sampling: float,
         output_dir: Union[str, Path],
         *,
@@ -1799,7 +1359,7 @@ class CuSift:
         ----------
         image : str | Path | numpy.ndarray
             Source image (file path or 2-D float32 array).
-        keypoints : KeypointList
+        keypoints : Keypoints
             Keypoints returned by :meth:`extract`.
         min_sampling : float
             Minimum subsampling value; keypoints below this are skipped.

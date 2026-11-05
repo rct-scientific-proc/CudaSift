@@ -26,10 +26,10 @@ struct SiftPointCompare
 {
     __host__ __device__ bool operator()(const SiftPoint &a, const SiftPoint &b) const
     {
-        if (a.ypos != b.ypos)
-            return a.ypos < b.ypos;
-        if (a.xpos != b.xpos)
-            return a.xpos < b.xpos;
+        if (a.y != b.y)
+            return a.y < b.y;
+        if (a.x != b.x)
+            return a.x < b.x;
         return a.scale < b.scale;
     }
 };
@@ -87,13 +87,13 @@ void FreeSiftTempMemory(float *memoryTmp)
 void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initBlur, float thresh, float lowestScale, float highestScale, float edgeLimit, float *tempMemory)
 {
     // Never publish a stale count: if anything below throws, the caller sees 0.
-    siftData->numPts = 0;
+    siftData->count = 0;
     // The public API clamps octaves to [3, 7]; this internal entry point did
     // not, and numOctaves >= 8 overflowed the kernel[] table below and the
     // 17-entry device counter, while numOctaves <= 0 read d_pointCounter[-1].
     if (numOctaves < 1 || numOctaves > 7)
         cusift_fail(__FILE__, __LINE__, "ExtractSift: numOctaves must be in [1, 7]");
-    if (siftData->d_data == NULL || siftData->maxPts <= 0)
+    if (siftData->device == NULL || siftData->capacity <= 0)
         cusift_fail(__FILE__, __LINE__, "ExtractSift: SiftData is not initialised (call InitSiftData first)");
     if (img->d_data == NULL || img->width <= 0 || img->height <= 0)
         cusift_fail(__FILE__, __LINE__, "ExtractSift: image has no device data");
@@ -103,7 +103,7 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
 
     // ---- Per-call device context (replaces module-level __constant__/__device__ globals) ----
     SiftDeviceContext ctx;
-    ctx.maxNumPoints = siftData->maxPts;
+    ctx.maxNumPoints = siftData->capacity;
 
     const size_t counterBytes   = (8 * 2 + 1) * sizeof(unsigned int);
     const size_t laplaceBytes   = 8 * 12 * 16 * sizeof(float);
@@ -156,7 +156,7 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     // sqrt(initBlur^2 + scale_i^2).  Passing initBlur here subtracted it a
     // second time (var = scale_i^2 - initBlur^2), and since the finest
     // octave's first level has scale_0 = 2^(-1/5) = 0.8706, any
-    // init_blur_ >= 0.8706 -- including the documented default of 1.0 --
+    // initial_blur >= 0.8706 -- including the documented default of 1.0 --
     // made var <= 0 and produced inf/NaN Gaussian taps, so the two finest
     // scale levels of the finest octave yielded no keypoints at all.
     PrepareLaplaceKernels(numOctaves, 0.0f, kernel);
@@ -172,20 +172,20 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
     // Safe because numOctaves is capped at 7 → index 15 < counter length 17.
     unsigned int devCount = 0;
     safeCall(cudaMemcpy(&devCount, &ctx.d_pointCounter[2 * numOctaves + 1], sizeof(unsigned int), cudaMemcpyDeviceToHost));
-    const int numPts = (devCount < (unsigned int)siftData->maxPts) ? (int)devCount : siftData->maxPts;
+    const int numPts = (devCount < (unsigned int)siftData->capacity) ? (int)devCount : siftData->capacity;
 
     // Sync device before sorting and copying to host
     safeCall(cudaDeviceSynchronize());
 
     // Sort by ypos, then xpos, then scale using thrust
-    thrust::sort(thrust::device, siftData->d_data, siftData->d_data + numPts, SiftPointCompare());
+    thrust::sort(thrust::device, siftData->device, siftData->device + numPts, SiftPointCompare());
 
-    if (siftData->h_data)
-        safeCall(cudaMemcpy(siftData->h_data, siftData->d_data, sizeof(SiftPoint) * (size_t)numPts, cudaMemcpyDeviceToHost));
+    if (siftData->host)
+        safeCall(cudaMemcpy(siftData->host, siftData->device, sizeof(SiftPoint) * (size_t)numPts, cudaMemcpyDeviceToHost));
     // Publish the count only once h_data is valid, so a throw from the sync,
     // the sort (thrust allocates temporary storage) or the copy never leaves
     // numPts > 0 over unwritten host memory.
-    siftData->numPts = numPts;
+    siftData->count = numPts;
     // lowImgGuard, memoryTmpGuard, and contextMemGuard are cleaned up automatically
 }
 
@@ -264,10 +264,10 @@ void ExtractSiftOctave(SiftData *siftData, CudaImage *img, int octave, float thr
 // FreeSiftData() is always safe afterwards.
 void InitSiftData(SiftData *data, int num, bool host, bool dev)
 {
-    data->numPts = 0;
-    data->maxPts = 0;
-    data->h_data = NULL;
-    data->d_data = NULL;
+    data->count = 0;
+    data->capacity = 0;
+    data->host = NULL;
+    data->device = NULL;
     // The byte count used to be computed in a 32-bit int: a large num silently
     // wrapped to a tiny allocation while maxPts kept the large value, and every
     // kernel then wrote past the buffer.  Validate, and size in size_t.
@@ -279,26 +279,26 @@ void InitSiftData(SiftData *data, int num, bool host, bool dev)
     {
         // calloc, not malloc: the caller may read fields the extraction kernels
         // never write, and heap garbage must not be exported as keypoint data.
-        data->h_data = (SiftPoint *)calloc((size_t)num, sizeof(SiftPoint));
-        if (data->h_data == NULL)
+        data->host = (SiftPoint *)calloc((size_t)num, sizeof(SiftPoint));
+        if (data->host == NULL)
             cusift_fail(__FILE__, __LINE__, "InitSiftData: host allocation of " + std::to_string(sz) + " bytes failed");
     }
     if (dev)
     {
-        cudaError_t err = cudaMalloc((void **)&data->d_data, sz);
+        cudaError_t err = cudaMalloc((void **)&data->device, sz);
         if (err == cudaSuccess)
-            err = cudaMemset(data->d_data, 0, sz);
+            err = cudaMemset(data->device, 0, sz);
         if (err != cudaSuccess)
         {
-            if (data->d_data)
-                cudaFree(data->d_data);
-            data->d_data = NULL;
-            free(data->h_data);
-            data->h_data = NULL;
+            if (data->device)
+                cudaFree(data->device);
+            data->device = NULL;
+            free(data->host);
+            data->host = NULL;
             cusift_safe_call(err, __FILE__, __LINE__); // throws
         }
     }
-    data->maxPts = num;
+    data->capacity = num;
 }
 
 // Keep
@@ -306,26 +306,26 @@ void FreeSiftData(SiftData *data)
 {
     // Use cudaFree directly (not safeCall) so this function is safe
     // to call from destructors during stack unwinding.
-    if (data->d_data != NULL)
+    if (data->device != NULL)
     {
-        cudaError_t e = cudaFree(data->d_data);
+        cudaError_t e = cudaFree(data->device);
         if (e != cudaSuccess)
         {
-            // Typically a stale handle after CusiftResetDevice(), or a sticky
+            // Typically a stale handle after cusift_device_reset(), or a sticky
             // device error.  Clear the flag and report it as a warning; this
             // path must stay non-throwing because it runs during unwinding.
             (void)cudaGetLastError();
             char buf[160];
             snprintf(buf, sizeof(buf), "cudaFree of the device keypoint buffer failed: %s", cudaGetErrorString(e));
-            cusift_report_warning("DeleteSiftData", buf);
+            cusift_report_warning("cusift_keypoints_free", buf);
         }
     }
-    data->d_data = NULL;
-    if (data->h_data != NULL)
-        free(data->h_data);
-    data->numPts = 0;
-    data->maxPts = 0;
-    data->h_data = NULL;
+    data->device = NULL;
+    if (data->host != NULL)
+        free(data->host);
+    data->count = 0;
+    data->capacity = 0;
+    data->host = NULL;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -362,7 +362,7 @@ double ComputeOrientations(cudaTextureObject_t texObj, CudaImage * /*src*/, Sift
 {
     dim3 blocks(512);
     dim3 threads(11 * 11);
-    ComputeOrientationsCONST<<<blocks, threads>>>(texObj, siftData->d_data, octave, ctx.maxNumPoints, ctx.d_pointCounter);
+    ComputeOrientationsCONST<<<blocks, threads>>>(texObj, siftData->device, octave, ctx.maxNumPoints, ctx.d_pointCounter);
     checkMsg("ComputeOrientations() execution failed\n");
     return 0.0;
 }
@@ -372,7 +372,7 @@ double ExtractSiftDescriptors(cudaTextureObject_t texObj, SiftData *siftData, fl
 {
     dim3 blocks(512);
     dim3 threads(16, 8);
-    ExtractSiftDescriptorsCONSTNew<<<blocks, threads>>>(texObj, siftData->d_data, subsampling, octave, ctx.maxNumPoints, ctx.d_pointCounter);
+    ExtractSiftDescriptorsCONSTNew<<<blocks, threads>>>(texObj, siftData->device, subsampling, octave, ctx.maxNumPoints, ctx.d_pointCounter);
     checkMsg("ExtractSiftDescriptors() execution failed\n");
     return 0.0;
 }
@@ -459,7 +459,7 @@ double FindPointsMulti(CudaImage *sources, SiftData *siftData, float thresh, flo
     int h = sources->height;
     dim3 blocks(iDivUp(w, MINMAX_W) * NUM_SCALES, iDivUp(h, MINMAX_H));
     dim3 threads(MINMAX_W + 2);
-    FindPointsMultiNew<<<blocks, threads>>>(sources->d_data, siftData->d_data, w, p, h, subsampling, lowestScale, highestScale, thresh, factor, edgeLimit, octave, ctx.maxNumPoints, ctx.d_pointCounter);
+    FindPointsMultiNew<<<blocks, threads>>>(sources->d_data, siftData->device, w, p, h, subsampling, lowestScale, highestScale, thresh, factor, edgeLimit, octave, ctx.maxNumPoints, ctx.d_pointCounter);
     checkMsg("FindPointsMulti() execution failed\n");
     return 0.0;
 }
@@ -471,11 +471,11 @@ double FindPointsMulti(CudaImage *sources, SiftData *siftData, float thresh, flo
 // Keep
 void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
 {
-    if (!data || !data->h_data || data->numPts <= 1)
+    if (!data || !data->host || data->count <= 1)
         return;
 
-    const int n = data->numPts;
-    SiftPoint *pts = data->h_data;
+    const int n = data->count;
+    SiftPoint *pts = data->host;
 
     // --- Build an index sorted by scale (descending) --------------------
     std::vector<int> order(n);
@@ -497,10 +497,10 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
         return;  // degenerate (all scales ~0) or NaN
 
     // Find bounding box
-    float minX = pts[0].xpos, maxX = minX;
-    float minY = pts[0].ypos, maxY = minY;
+    float minX = pts[0].x, maxX = minX;
+    float minY = pts[0].y, maxY = minY;
     for (int i = 1; i < n; i++) {
-        float x = pts[i].xpos, y = pts[i].ypos;
+        float x = pts[i].x, y = pts[i].y;
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
@@ -536,8 +536,8 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
     std::vector<std::vector<int>> grid((size_t)gridW * (size_t)gridH);
     for (int i = 0; i < n; i++) {
         int idx = order[i];
-        int cx = cellOf(pts[idx].xpos, minX, gridW);
-        int cy = cellOf(pts[idx].ypos, minY, gridH);
+        int cx = cellOf(pts[idx].x, minX, gridW);
+        int cy = cellOf(pts[idx].y, minY, gridH);
         grid[(size_t)cy * gridW + cx].push_back(idx);
     }
 
@@ -549,8 +549,8 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
         if (suppressed[i])
             continue;
 
-        float xi = pts[i].xpos;
-        float yi = pts[i].ypos;
+        float xi = pts[i].x;
+        float yi = pts[i].y;
         float ri = radiusScale * pts[i].scale;
         float ri2 = ri * ri;
 
@@ -573,8 +573,8 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
                     // j must be smaller-or-equal scale (processed after i)
                     if (pts[j].scale > pts[i].scale)
                         continue;
-                    float dx = pts[j].xpos - xi;
-                    float dy = pts[j].ypos - yi;
+                    float dx = pts[j].x - xi;
+                    float dy = pts[j].y - yi;
                     if (dx * dx + dy * dy < ri2)
                         suppressed[j] = true;
                 }
@@ -591,10 +591,10 @@ void SuppressEmbeddedPoints(SiftData *data, float radiusScale)
             dst++;
         }
     }
-    data->numPts = dst;
+    data->count = dst;
 
     // --- Re-upload to device if device buffer exists ---------------------
-    if (data->d_data && dst > 0)
-        safeCall(cudaMemcpy(data->d_data, data->h_data,
+    if (data->device && dst > 0)
+        safeCall(cudaMemcpy(data->device, data->host,
                             sizeof(SiftPoint) * dst, cudaMemcpyHostToDevice));
 }

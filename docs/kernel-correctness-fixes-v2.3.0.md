@@ -1,5 +1,10 @@
 # Kernel correctness fixes (v2.3.0)
 
+> Written against the 2.x API. Option names below are the 2.x ones
+> (`init_blur_`, `thresh_`, ...); see docs/migration-3.0.md for their 3.0
+> equivalents (`initial_blur`, `contrast_threshold`, ...). The kernel
+> analysis is unaffected.
+
 This release fixes seven correctness defects in the CUDA kernels. Two of them
 affected every extraction run at the library's own documented default settings,
 so **detection results change in this release**. If you have tuned thresholds

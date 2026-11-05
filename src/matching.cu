@@ -47,7 +47,7 @@ __global__ void FindMaxCorr10(SiftPoint *sift1, SiftPoint *sift2, int numPts1, i
     {
         int p1 = min(bp1 + j, numPts1 - 1);
         for (int d = tx; d < NDIM / 4; d += M7W)
-            buffer1[j * NDIM / 4 + (d + j) % (NDIM / 4)] = ((float4 *)&sift1[p1].data)[d];
+            buffer1[j * NDIM / 4 + (d + j) % (NDIM / 4)] = ((float4 *)&sift1[p1].descriptor)[d];
     }
 
     float max_score[NRX];
@@ -76,7 +76,7 @@ __global__ void FindMaxCorr10(SiftPoint *sift1, SiftPoint *sift2, int numPts1, i
         {
             int p2 = min(bp2 + j, numPts2 - 1);
             for (int d = tx; d < NDIM / 4; d += M7W)
-                buffer2[j * NDIM / 4 + d] = ((float4 *)&sift2[p2].data)[d];
+                buffer2[j * NDIM / 4 + d] = ((float4 *)&sift2[p2].descriptor)[d];
         }
         __syncthreads();
 
@@ -157,8 +157,8 @@ __global__ void FindMaxCorr10(SiftPoint *sift1, SiftPoint *sift2, int numPts1, i
             }
         sift1[bp1 + tx].score = max_score;
         sift1[bp1 + tx].match = index;
-        sift1[bp1 + tx].match_xpos = index >= 0 ? sift2[index].xpos : 0.0f;
-        sift1[bp1 + tx].match_ypos = index >= 0 ? sift2[index].ypos : 0.0f;
+        sift1[bp1 + tx].match_x = index >= 0 ? sift2[index].x : 0.0f;
+        sift1[bp1 + tx].match_y = index >= 0 ? sift2[index].y : 0.0f;
         sift1[bp1 + tx].ambiguity = sec_score / (max_score + 1e-6f);
     }
 }
@@ -411,12 +411,12 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     for (int i = 0; i < 9; i++)
         homography[i] = std::nanf("");
     homography[8] = 1.0f;
-    if (data->d_data == NULL)
+    if (data->device == NULL)
         return 0.0f;
-    SiftPoint *d_sift = data->d_data;
+    SiftPoint *d_sift = data->device;
     ValidateRansacLoops(numLoops);
     numLoops = iDivUp(numLoops, 16) * 16;
-    int numPts = data->numPts;
+    int numPts = data->count;
     if (numPts < 8)
         return 0.0f;
     int numPtsUp = iDivUp(numPts, 16) * 16;
@@ -458,10 +458,10 @@ double FindHomography_private(SiftData *data, float *homography, int *numMatches
     {
         GenerateRandomSamples(h_randPts, numLoops, validPts, numValid, seed);
         safeCall(cudaMemcpy(d_randPts, h_randPts, randSize, cudaMemcpyHostToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[0 * numPtsUp], szFl, &d_sift[0].xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[1 * numPtsUp], szFl, &d_sift[0].ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[2 * numPtsUp], szFl, &d_sift[0].match_xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[3 * numPtsUp], szFl, &d_sift[0].match_ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[0 * numPtsUp], szFl, &d_sift[0].x, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[1 * numPtsUp], szFl, &d_sift[0].y, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[2 * numPtsUp], szFl, &d_sift[0].match_x, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[3 * numPtsUp], szFl, &d_sift[0].match_y, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
         ComputeHomographies<<<numLoops / 16, 16>>>(d_coord, d_randPts, d_homo, numPtsUp);
         safeCall(cudaDeviceSynchronize());
         checkMsg("ComputeHomographies() execution failed\n");
@@ -614,12 +614,12 @@ double FindSimilarity_private(SiftData *data, float *homography, int *numMatches
     for (int i = 0; i < 9; i++)
         homography[i] = std::nanf("");
     homography[8] = 1.0f;
-    if (data->d_data == NULL)
+    if (data->device == NULL)
         return 0.0f;
-    SiftPoint *d_sift = data->d_data;
+    SiftPoint *d_sift = data->device;
     ValidateRansacLoops(numLoops);
     numLoops = iDivUp(numLoops, 16) * 16;
-    int numPts = data->numPts;
+    int numPts = data->count;
     if (numPts < 4)
         return 0.0f;
     int numPtsUp = iDivUp(numPts, 16) * 16;
@@ -665,10 +665,10 @@ double FindSimilarity_private(SiftData *data, float *homography, int *numMatches
     {
         GenerateRandomSamples2(h_randPts, numLoops, validPts, numValid, seed);
         safeCall(cudaMemcpy(d_randPts, h_randPts, randSize, cudaMemcpyHostToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[0 * numPtsUp], szFl, &d_sift[0].xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[1 * numPtsUp], szFl, &d_sift[0].ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[2 * numPtsUp], szFl, &d_sift[0].match_xpos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
-        safeCall(cudaMemcpy2D(&d_coord[3 * numPtsUp], szFl, &d_sift[0].match_ypos, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[0 * numPtsUp], szFl, &d_sift[0].x, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[1 * numPtsUp], szFl, &d_sift[0].y, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[2 * numPtsUp], szFl, &d_sift[0].match_x, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
+        safeCall(cudaMemcpy2D(&d_coord[3 * numPtsUp], szFl, &d_sift[0].match_y, szPt, szFl, numPts, cudaMemcpyDeviceToDevice));
 
         ComputeSimilarities<<<numLoops / 16, 16>>>(d_coord, d_randPts, d_sims, numPtsUp);
         safeCall(cudaDeviceSynchronize());
@@ -718,14 +718,14 @@ double FindSimilarity_private(SiftData *data, float *homography, int *numMatches
 // Keep
 double MatchSiftData_private(SiftData *data1, SiftData *data2)
 {
-    int numPts1 = data1->numPts;
-    int numPts2 = data2->numPts;
+    int numPts1 = data1->count;
+    int numPts2 = data2->count;
     if (!numPts1 || !numPts2)
         return 0.0;
-    if (data1->d_data == NULL || data2->d_data == NULL)
+    if (data1->device == NULL || data2->device == NULL)
         return 0.0f;
-    SiftPoint *sift1 = data1->d_data;
-    SiftPoint *sift2 = data2->d_data;
+    SiftPoint *sift1 = data1->device;
+    SiftPoint *sift2 = data2->device;
 
     // No CleanMatches pass: FindMaxCorr10 below writes score, match,
     // match_xpos, match_ypos and ambiguity for every p1 < numPts1, so
@@ -737,11 +737,11 @@ double MatchSiftData_private(SiftData *data1, SiftData *data2)
     checkMsg("FindMaxCorr10() execution failed\n");
 
 
-    if (data1->h_data != NULL)
+    if (data1->host != NULL)
     {
-        float *h_ptr = &data1->h_data[0].score;
-        float *d_ptr = &data1->d_data[0].score;
-        safeCall(cudaMemcpy2D(h_ptr, sizeof(SiftPoint), d_ptr, sizeof(SiftPoint), 5 * sizeof(float), data1->numPts, cudaMemcpyDeviceToHost));
+        float *h_ptr = &data1->host[0].score;
+        float *d_ptr = &data1->device[0].score;
+        safeCall(cudaMemcpy2D(h_ptr, sizeof(SiftPoint), d_ptr, sizeof(SiftPoint), 5 * sizeof(float), data1->count, cudaMemcpyDeviceToHost));
     }
 
     return 0.0;

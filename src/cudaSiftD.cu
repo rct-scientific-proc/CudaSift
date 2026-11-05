@@ -193,8 +193,8 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
 
         for (int y = ty; y < 16; y += 8)
         {
-            float xpos = d_sift[bx].xpos + (tx - 7.5f) * scosa - (y - 7.5f) * ssina + 0.5f;
-            float ypos = d_sift[bx].ypos + (tx - 7.5f) * ssina + (y - 7.5f) * scosa + 0.5f;
+            float xpos = d_sift[bx].x + (tx - 7.5f) * scosa - (y - 7.5f) * ssina + 0.5f;
+            float ypos = d_sift[bx].y + (tx - 7.5f) * ssina + (y - 7.5f) * scosa + 0.5f;
             float dx = tex2D<float>(texObj, xpos + cosa, ypos + sina) -
                        tex2D<float>(texObj, xpos - cosa, ypos - sina);
             float dy = tex2D<float>(texObj, xpos - sina, ypos + cosa) -
@@ -281,12 +281,12 @@ __global__ void ExtractSiftDescriptorsCONSTNew(cudaTextureObject_t texObj, SiftP
         __syncthreads();
 
         float tsum2 = sums[0] + sums[1] + sums[2] + sums[3];
-        float *desc = d_sift[bx].data;
+        float *desc = d_sift[bx].descriptor;
         desc[idx] = (tsum2 > 0.0f) ? tsum1 * rsqrtf(tsum2) : 0.0f;
         if (idx == 0)
         {
-            d_sift[bx].xpos *= subsampling;
-            d_sift[bx].ypos *= subsampling;
+            d_sift[bx].x *= subsampling;
+            d_sift[bx].y *= subsampling;
             d_sift[bx].scale *= subsampling;
         }
         __syncthreads();
@@ -321,8 +321,8 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
         if (tx < 64)
             hist[tx] = 0.0f;
         __syncthreads();
-        float xp = d_Sift[bx].xpos - 4.5f;
-        float yp = d_Sift[bx].ypos - 4.5f;
+        float xp = d_Sift[bx].x - 4.5f;
+        float yp = d_Sift[bx].y - 4.5f;
         int yd = tx / 11;
         int xd = tx - yd * 11;
         float xf = xp + xd;
@@ -402,8 +402,8 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
                     unsigned int idx = atomicInc(&d_PointCounter[2 * octave + 1], 0x7fffffff);
                     if (idx < d_MaxNumPoints)
                     {
-                        d_Sift[idx].xpos = d_Sift[bx].xpos;
-                        d_Sift[idx].ypos = d_Sift[bx].ypos;
+                        d_Sift[idx].x = d_Sift[bx].x;
+                        d_Sift[idx].y = d_Sift[bx].y;
                         d_Sift[idx].scale = d_Sift[bx].scale;
                         d_Sift[idx].sharpness = d_Sift[bx].sharpness;
                         d_Sift[idx].edgeness = d_Sift[bx].edgeness;
@@ -412,8 +412,8 @@ __global__ void ComputeOrientationsCONST(cudaTextureObject_t texObj, SiftPoint *
                         d_Sift[idx].score = 0.0f;
                         d_Sift[idx].ambiguity = 0.0f;
                         d_Sift[idx].match = -1;
-                        d_Sift[idx].match_xpos = 0.0f;
-                        d_Sift[idx].match_ypos = 0.0f;
+                        d_Sift[idx].match_x = 0.0f;
+                        d_Sift[idx].match_y = 0.0f;
                         d_Sift[idx].match_error = 0.0f;
                     }
                 }
@@ -602,20 +602,20 @@ __global__ void FindPointsMultiNew(float *d_Data0, SiftPoint *d_Sift, int width,
                 // torn record. ComputeOrientationsCONST uses the same pattern.
                 if (idx < (unsigned int)maxPts)
                 {
-                    d_Sift[idx].xpos = xpos + pdx;
-                    d_Sift[idx].ypos = ypos + pdy;
+                    d_Sift[idx].x = xpos + pdx;
+                    d_Sift[idx].y = ypos + pdy;
                     d_Sift[idx].scale = sc;
                     d_Sift[idx].sharpness = val + dval;
                     d_Sift[idx].edgeness = edge;
                     d_Sift[idx].subsampling = subsampling;
-                    // The match fields are only produced by MatchSiftData;
+                    // The match fields are only produced by cusift_match;
                     // define them here so an unmatched SiftData never exports
                     // whatever the device allocator handed back.
                     d_Sift[idx].score = 0.0f;
                     d_Sift[idx].ambiguity = 0.0f;
                     d_Sift[idx].match = -1;
-                    d_Sift[idx].match_xpos = 0.0f;
-                    d_Sift[idx].match_ypos = 0.0f;
+                    d_Sift[idx].match_x = 0.0f;
+                    d_Sift[idx].match_y = 0.0f;
                     d_Sift[idx].match_error = 0.0f;
                 }
             }

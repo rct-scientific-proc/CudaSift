@@ -20,9 +20,16 @@ elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 project(cudaSift
-  VERSION 2.5.0
+  VERSION 3.0.0
   LANGUAGES C CXX CUDA
 )
+
+# The header carries the version as macros for callers; keep the two in step.
+file(STRINGS include/cusift.h _cusift_ver_lines REGEX "#define CUSIFT_VERSION_(MAJOR|MINOR|PATCH)")
+string(REGEX REPLACE ".*MAJOR ([0-9]+).*MINOR ([0-9]+).*PATCH ([0-9]+).*" "\\1.\\2.\\3" _cusift_header_version "${_cusift_ver_lines}")
+if(NOT _cusift_header_version STREQUAL PROJECT_VERSION)
+  message(FATAL_ERROR "include/cusift.h declares version ${_cusift_header_version} but CMakeLists.txt says ${PROJECT_VERSION}; update one of them")
+endif()
 
 # C11, C++17 standards
 set(CMAKE_C_STANDARD 11)

@@ -33,7 +33,7 @@ public:
     // Zero-initialize so the destructor's FreeSiftData() is safe even if the
     // guard is destroyed before InitSiftData() populates the buffers (e.g. an
     // exception thrown during allocation). FreeSiftData() is NULL-safe.
-    SiftDataGuard() { data_.numPts = 0; data_.maxPts = 0; data_.h_data = nullptr; data_.d_data = nullptr; }
+    SiftDataGuard() { data_.count = 0; data_.capacity = 0; data_.host = nullptr; data_.device = nullptr; }
     ~SiftDataGuard() { FreeSiftData(&data_); }
 
     SiftDataGuard(const SiftDataGuard&) = delete;

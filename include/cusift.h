@@ -1,14 +1,17 @@
 /**
  * @file cusift.h
- * @author rct-scientific-proc
- * @brief C API for the CudaSift GPU-accelerated SIFT feature library.
- * @version 0.1
- * @date 2026-02-25
+ * @brief Public C API of cusift: GPU SIFT extraction, matching, RANSAC
+ *        homography estimation and warping onto a common canvas.
+ *
+ * Naming: every exported symbol is prefixed `cusift_` and written in
+ * snake_case; types have no suffix; struct fields are plain snake_case.
+ * Functions report failure through the thread-local error state (see
+ * cusift_last_error()), never through return codes or exceptions.
  *
  * @par References
  * M. Björkman, N. Bergström and D. Kragic, "Detecting, segmenting and tracking unknown objects using multi-label MRF inference", CVIU, 118, pp. 111-127, January 2014
  * https://github.com/Celebrandil/CudaSift
- * 
+ *
  * MIT License
  *
  * Copyright (c) 2017 Mårten Björkman
@@ -30,43 +33,33 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- * 
- * Export Functions:
- * - InitializeCudaSift()   
- * - ExtractSiftFromImage()
- * - MatchSiftData()
- * - FindHomography()
- * - WarpImages()
- * - WarpImages_GPU()
- * - ComputeWarpGeometry()
- * - DeleteSiftData()
- * - FreeImage()
- * - CusiftGetLastErrorString()
- * - CusiftHadError()
- * - CusiftResetDevice()
- * - CusiftSetErrorLog()
- * - CusiftSetErrorCallback()
- * - CusiftErrorLogDroppedCount()
- * - SaveSiftData()
- * - ExtractAndMatchSift()
- * - ExtractAndMatchAndFindHomography()
- * - ExtractAndMatchAndFindHomographyAndWarp()
- * - ExtractAndMatchAndFindHomographyAndWarp_GPU()
- * - EstimateVramExtractSift()
- * - EstimateVramMatchSift()
- * - EstimateVramFindHomography()
- * - EstimateVramWarpImages()
- * - EstimateVramFullPipeline()
- * 
+ *
+ * Exported functions
+ *   Version and device:   cusift_version, cusift_init, cusift_device_reset
+ *   Errors:               cusift_last_error, cusift_set_error_log,
+ *                         cusift_set_error_callback, cusift_error_log_dropped
+ *   Defaults:             cusift_default_extract_options, cusift_default_homography_options
+ *   Stages:               cusift_extract, cusift_match, cusift_estimate_homography,
+ *                         cusift_compute_canvas, cusift_warp, cusift_warp_to_device
+ *   Pipelines:            cusift_extract_and_match, cusift_align,
+ *                         cusift_align_and_warp, cusift_align_and_warp_to_device
+ *   Resources:            cusift_keypoints_free, cusift_image_free,
+ *                         cusift_device_image_free, cusift_keypoints_save_json
+ *   Device memory:        cusift_memory_extract, cusift_memory_match,
+ *                         cusift_memory_homography, cusift_memory_warp, cusift_memory_pipeline
  */
-
 
 #ifndef CUSIFT_H
 #define CUSIFT_H
 
 #include <stddef.h>  /* size_t */
+#include <stdbool.h> /* bool */
 
-// -- Export / import macros ------------------------------
+#define CUSIFT_VERSION_MAJOR 3
+#define CUSIFT_VERSION_MINOR 0
+#define CUSIFT_VERSION_PATCH 0
+
+/* -- Export / import macros ------------------------------ */
 #ifdef CUSIFT_STATIC
 #define CUSIFT_API
 #elif defined(_WIN32)
@@ -81,707 +74,477 @@
 #define CUSIFT_API
 #endif
 
-// C linkage for easier interoperability with C and other languages
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-    /**
-     * @brief Return the last error from the library, including file, line, and
-     *        human-readable message.  All output parameters are optional
-     *        (pass NULL / 0 to skip).
-     *
-     * The strings written to @p filename and @p error_message are always
-     * NUL-terminated and are truncated if the destination buffers are
-     * smaller than the source string.
-     *
-     * @param line_number       Receives the source line where the error originated.
-     * @param filename          Buffer that receives the source filename.
-     * @param filename_size     Size in bytes of @p filename.
-     * @param error_message     Buffer that receives the error description.
-     * @param error_message_size Size in bytes of @p error_message.
-     */
-    CUSIFT_API void CusiftGetLastErrorString(int *line_number,
-                                             char *filename,
-                                             size_t filename_size,
-                                             char *error_message,
-                                             size_t error_message_size);
+    /* ===================================================================== */
+    /* Version                                                               */
+    /* ===================================================================== */
 
     /**
-     * @brief Check whether the most recent library call encountered an error.
-     *
-     * Every public API function clears the error flag on entry, so this always
-     * reflects the status of the *last* call.
-     *
-     * Argument validation failures (NULL pointers, out-of-range options,
-     * oversized images) are reported the same way rather than crashing.
-     *
-     * @return Non-zero if an error occurred, 0 otherwise.
+     * @brief Version of the library actually loaded (the header's
+     *        CUSIFT_VERSION_* macros give the version compiled against).
+     *        Any output pointer may be NULL.
      */
-    CUSIFT_API int CusiftHadError(void);
+    CUSIFT_API void cusift_version(int *major, int *minor, int *patch);
+
+    /* ===================================================================== */
+    /* Errors                                                                */
+    /* ===================================================================== */
 
     /**
-     * @brief Return the underlying CUDA error code from the most recent library
-     *        call, cast to @c int (matching the @c cudaError_t enum values).
+     * @brief One error or warning: what cusift_last_error() reports and what an
+     *        error callback receives.
      *
-     * Returns 0 (== @c cudaSuccess) when:
-     *   - no error occurred, or
-     *   - the error originated outside of CUDA (e.g. invalid arguments,
-     *     non-finite homography, file-I/O failure in SaveSiftData).
-     *
-     * To distinguish "no error" from "non-CUDA error", check
-     * @ref CusiftHadError() first.
-     *
-     * The returned integer is suitable for casting back to @c cudaError_t in
-     * a translation unit that includes @c <cuda_runtime.h>, but the public
-     * header intentionally avoids that dependency.
-     */
-    CUSIFT_API int CusiftGetLastCudaError(void);
-
-    /**
-     * @brief Recover from a sticky CUDA error by destroying and re-creating
-     *        this process's CUDA context on the current device.
-     *
-     * Some device errors are sticky: once a kernel has faulted (for example
-     * cudaErrorIllegalAddress, cudaErrorLaunchFailure, cudaErrorLaunchTimeout,
-     * cudaErrorECCUncorrectable or cudaErrorHardwareStackError), every later
-     * CUDA call in the process returns that same error until the context is
-     * reset. CusiftGetLastCudaError() returns the code so a caller can
-     * recognise the situation.
-     *
-     * The reset is process-local. It calls cudaDeviceReset(), which tears down
-     * only the calling process's context; other processes sharing the GPU are
-     * not affected. Inside this process, however, every device allocation is
-     * destroyed, including the device buffers of every SiftData and every
-     * ImageStrided_t warp output. Call DeleteSiftData() and FreeImage_GPU() on
-     * all of them before resetting, or at least never touch them afterwards,
-     * and make sure no other thread of this process is inside a library call.
-     * The function re-creates the context before returning and sets the error
-     * state if the device is still unusable.
-     */
-    CUSIFT_API void CusiftResetDevice(void);
-
-    /**
-     * @brief One error or warning, as delivered to an error callback.
-     *
-     * Every pointer is valid only for the duration of the callback; copy what
-     * you keep. severity is 0 for an error (the API call failed and
-     * CusiftHadError() is set) and 1 for a warning (the call completed in a
-     * degraded way: the AVX2 refinement path refusing to run on a CPU without
-     * AVX2, or a device free failing during cleanup).
+     * severity is 0 for an error (the call failed) and 1 for a warning (the
+     * call completed in a degraded way: the AVX2 refinement path refusing to
+     * run on a CPU without AVX2, or a device free failing during cleanup).
+     * In a callback the pointers are valid for the duration of the callback.
+     * From cusift_last_error() they are valid until the next library call on
+     * the same thread. Copy what you keep.
      */
     typedef struct
     {
         int severity;                 /**< 0 = error, 1 = warning. */
-        const char *function;         /**< Public API function involved, e.g. "ExtractSiftFromImage". */
+        const char *function;         /**< Public function involved, e.g. "cusift_extract". */
         const char *file;             /**< Source file where the failure originated, or "". */
         int line;                     /**< Source line, or 0. */
         int cuda_error;               /**< cudaError_t value; 0 when the failure was not a CUDA error. */
         const char *cuda_error_name;  /**< e.g. "cudaErrorIllegalAddress"; "" when cuda_error is 0. */
         const char *message;          /**< Human-readable description. */
-        unsigned long long thread_id; /**< Hash of the calling thread's id. */
+        unsigned long long thread_id; /**< Hash of the thread's id. */
         long long timestamp_ms;       /**< UTC Unix time in milliseconds. */
-    } CusiftErrorRecord_t;
+    } cusift_error_record;
 
-    typedef void (*CusiftErrorCallback_t)(const CusiftErrorRecord_t *record, void *user_data);
+    typedef void (*cusift_error_callback)(const cusift_error_record *record, void *user_data);
+
+    /**
+     * @brief Did the most recent library call on this thread fail?
+     *
+     * Every function below except the resource-release functions and the
+     * error-sink setters clears the thread-local error state on entry, so
+     * this always describes the last such call. Argument validation failures
+     * (NULL pointers, out-of-range options, oversized images, device pointers
+     * passed as host images) are reported this way, never by crashing.
+     *
+     * @param record  If not NULL, receives the error; untouched when there is none.
+     * @return 1 if the last call failed, 0 otherwise.
+     */
+    CUSIFT_API int cusift_last_error(cusift_error_record *record);
 
     /**
      * @brief Append every error and warning to a log file, in addition to the
      *        thread-local error state.
      *
      * Off by default. Pass NULL to turn it off, "" to log to
-     * <temp dir>/cusift-errors.log (the platform temporary directory:
-     * TMPDIR/TMP/TEMP or /tmp on POSIX, GetTempPath on Windows), or an explicit
-     * path. max_bytes caps the file; 0 means 1 MiB. When a new line would push
-     * the file past the cap, the file is renamed to <path>.1 (replacing any
-     * previous .1) and started afresh, so disk use is bounded at twice the cap.
+     * <temp dir>/cusift-errors.log (TMPDIR/TMP/TEMP or /tmp on POSIX,
+     * GetTempPath on Windows), or an explicit path. max_bytes caps the file;
+     * 0 means 1 MiB. When a new line would push the file past the cap, the
+     * file is renamed to <path>.1 (replacing any previous .1) and started
+     * afresh, so disk use is bounded at twice the cap.
      *
-     * Each line holds a UTC timestamp, the severity, the calling thread id, the
-     * public function, the source file and line, the CUDA error code and name,
-     * and the message. The file is opened, appended and closed per record, so a
-     * line is in the operating system's hands before the call returns; errors
-     * are rare, so this costs nothing measurable.
+     * Each line holds a UTC timestamp, the severity, the thread id, the public
+     * function, the source file and line, the CUDA error code and name, and
+     * the message. The file is opened, appended and closed per record.
      *
-     * Logging never fails or alters the call being logged. Records that could
-     * not be written (unwritable path, full disk) are counted; see
-     * CusiftErrorLogDroppedCount(). This function does not touch the thread-local
-     * error state.
-     *
-     * Without a call to this function, the environment variable CUSIFT_ERROR_LOG
-     * is consulted once, on the first error: its value is the path, or the word
-     * "default" for the temporary-directory file. CUSIFT_ERROR_LOG_MAX_BYTES sets
-     * the cap. A call to CusiftSetErrorLog() always takes precedence.
-     *
-     * @param path      NULL = off, "" = default location, otherwise the file to append to.
-     * @param max_bytes Rotation threshold in bytes; 0 = 1 MiB.
+     * Logging never fails or alters the call being logged; records that could
+     * not be written are counted by cusift_error_log_dropped(). Without a call
+     * to this function the environment variable CUSIFT_ERROR_LOG is consulted
+     * once, on the first error: its value is the path, or "default" for the
+     * temporary-directory file; CUSIFT_ERROR_LOG_MAX_BYTES sets the cap. This
+     * function does not touch the thread-local error state.
      */
-    CUSIFT_API void CusiftSetErrorLog(const char *path, size_t max_bytes);
+    CUSIFT_API void cusift_set_error_log(const char *path, size_t max_bytes);
 
     /**
      * @brief Deliver every error and warning to a callback as well. NULL disables.
      *
      * The callback runs on the thread where the error occurred, after the
-     * thread-local error state has been set and after the log line (if any)
-     * has been written, and with no library lock held, so it may itself call
-     * CusiftSetErrorLog() or CusiftSetErrorCallback(). It must not throw.
+     * error state has been set and the log line (if any) written, with no
+     * library lock held, so it may reconfigure the sinks. It must not throw.
      * Process-wide: one callback for all threads.
      */
-    CUSIFT_API void CusiftSetErrorCallback(CusiftErrorCallback_t callback, void *user_data);
+    CUSIFT_API void cusift_set_error_callback(cusift_error_callback callback, void *user_data);
+
+    /** @brief Records that could not be written to the error log since the process started. */
+    CUSIFT_API unsigned long long cusift_error_log_dropped(void);
+
+    /* ===================================================================== */
+    /* Device                                                                */
+    /* ===================================================================== */
 
     /**
-     * @brief Number of records that could not be written to the error log since
-     *        the process started.
+     * @brief Select the CUDA device. Call once before anything else.
+     *        Uses device 0; fails if no CUDA device is present.
      */
-    CUSIFT_API unsigned long long CusiftErrorLogDroppedCount(void);
+    CUSIFT_API void cusift_init(void);
 
     /**
-     * @brief A single SIFT keypoint with its 128-d descriptor.
+     * @brief Recover from a sticky CUDA error by destroying and re-creating this
+     *        process's CUDA context on the current device.
+     *
+     * Some device errors are sticky: once a kernel has faulted (for example
+     * cudaErrorIllegalAddress, cudaErrorLaunchFailure, cudaErrorLaunchTimeout,
+     * cudaErrorECCUncorrectable or cudaErrorHardwareStackError), every later
+     * CUDA call in the process returns that same error until the context is
+     * reset; cusift_last_error() reports the code so a caller can recognise it.
+     *
+     * The reset is process-local: it calls cudaDeviceReset(), which tears down
+     * only the calling process's context, so other processes sharing the GPU
+     * are not affected. Inside this process, however, every device allocation
+     * is destroyed, including the device buffers of every cusift_keypoints and
+     * every cusift_device_image. Release all of them first, or at least never
+     * touch them afterwards, and make sure no other thread of this process is
+     * inside a library call. The function re-creates the context before
+     * returning and sets the error state if the device is still unusable.
      */
+    CUSIFT_API void cusift_device_reset(void);
+
+    /* ===================================================================== */
+    /* Types                                                                 */
+    /* ===================================================================== */
+
+    /** @brief A SIFT keypoint with its 128-d descriptor and its match fields. */
     typedef struct
     {
-        float xpos;        /**< X position in pixels. */
-        float ypos;        /**< Y position in pixels. */
-        float scale;       /**< Detected scale (sigma). */
-        float sharpness;   /**< DoG response sharpness. */
-        float edgeness;    /**< Edge response (trace^2/det of Hessian). */
-        float orientation; /**< Dominant orientation in radians. */
-        float score;       /**< Match score (set by MatchSiftData). */
-        float ambiguity;   /**< Ratio of best to second-best match distance. */
-        int match;         /**< Index of matched keypoint, or -1 if unmatched. */
-        float match_xpos;  /**< X position of the matched keypoint. */
-        float match_ypos;  /**< Y position of the matched keypoint. */
-        float match_error; /**< Match error (L2 descriptor distance ratio). */
-        float subsampling; /**< Subsampling factor (octave). */
-        float empty[3];    /**< Padding for alignment. */
-        float data[128];   /**< 128-dimensional SIFT descriptor. */
-    } SiftPoint;
+        float x;             /**< Column, in pixels of the original image. */
+        float y;             /**< Row, in pixels of the original image. */
+        float scale;         /**< Detected scale (sigma). */
+        float sharpness;     /**< Difference-of-Gaussians response at the keypoint. */
+        float edgeness;      /**< Edge response (trace^2 / det of the Hessian). */
+        float orientation;   /**< Dominant orientation in degrees. */
+        float score;         /**< Best match similarity (cosine), set by cusift_match. */
+        float ambiguity;     /**< Second-best / best match similarity, set by cusift_match. */
+        int match;           /**< Index of the matched keypoint in the other set, or -1. */
+        float match_x;       /**< Column of the matched keypoint. */
+        float match_y;       /**< Row of the matched keypoint. */
+        float match_error;   /**< Reprojection error under the refined homography, in pixels. */
+        float subsampling;   /**< Octave scale factor the keypoint was found at. */
+        float reserved[3];   /**< Padding; keep the record 16-byte aligned. */
+        float descriptor[128]; /**< Unit-length SIFT descriptor. */
+    } cusift_keypoint;
 
     /**
-     * @brief Container for a set of SIFT keypoints on host and device.
+     * @brief A set of keypoints on host and device.
      *
      * Ownership contract: zero-initialise the struct before its first use
-     * (`SiftData sd = {0};` in C, `SiftData sd{};` in C++).  Every function
-     * that fills a SiftData first releases any buffers it already holds, so
-     * one struct can be re-used across calls without leaking; call
-     * DeleteSiftData() when you are finished with it.  If a call fails, the
-     * struct is left empty (numPts == maxPts == 0, NULL buffers) and
-     * DeleteSiftData() remains safe.  Passing a struct that was never
-     * zero-initialised is undefined behaviour: its garbage pointers would be
-     * freed.
+     * (`cusift_keypoints kp = {0};` in C, `cusift_keypoints kp{};` in C++).
+     * Every function that fills it first releases any buffers it already
+     * holds, so one struct can be re-used across calls without leaking; call
+     * cusift_keypoints_free() when done. If a call fails the struct is left
+     * safe to free. Passing a struct that was never zero-initialised is
+     * undefined behaviour: its garbage pointers would be freed.
      */
     typedef struct
     {
-        int numPts;         /**< Number of available SIFT points. */
-        int maxPts;         /**< Number of allocated SIFT points. */
-
-        SiftPoint *h_data;  /**< Host (CPU) data. */
-        SiftPoint *d_data;  /**< Device (GPU) data. */
-    } SiftData;
+        int count;               /**< Number of valid keypoints. */
+        int capacity;            /**< Number of allocated keypoints. */
+        cusift_keypoint *host;   /**< Host copy, or NULL. */
+        cusift_keypoint *device; /**< Device copy, or NULL. */
+    } cusift_keypoints;
 
     /**
-     * @brief A grayscale image stored as a contiguous float buffer in HOST memory.
+     * @brief A grayscale float32 image in HOST memory, row-major, values in [0, 255].
      *
-     * host_img_ must point to memory the CPU can read: ordinary pageable
-     * memory, pinned memory from cudaHostAlloc / cudaMallocHost, or managed
-     * memory from cudaMallocManaged. A pointer returned by cudaMalloc is not
-     * CPU-readable; every entry point classifies the pointer and rejects it
-     * with the error "host_img_ points to device memory" instead of faulting
-     * on it. Use ImageStrided_t for device-resident warp output.
-     *
-     * Both dimensions must be in [8, 65535] pixels: below 8 the three octaves
-     * the library always builds would contain an empty level, and above 65535
-     * the detector's 16-bit candidate positions and the per-row kernel grid
-     * no longer fit. The library never modifies the input image data.
+     * pixels must point to memory the CPU can read: ordinary pageable memory,
+     * pinned memory from cudaHostAlloc / cudaMallocHost, or managed memory from
+     * cudaMallocManaged. A pointer returned by cudaMalloc is not CPU-readable;
+     * every entry point classifies the pointer and rejects it with the error
+     * "pixels points to device memory". Both dimensions must be in [8, 65535]
+     * pixels. The library never modifies an input image.
      */
     typedef struct
     {
-        float *host_img_;  /**< Pointer to row-major float32 pixel data. */
-        int width_;        /**< Image width in pixels. */
-        int height_;       /**< Image height in pixels. */
-    } Image_t;
+        float *pixels; /**< Row-major float32 pixel data. */
+        int width;     /**< Width in pixels. */
+        int height;    /**< Height in pixels. */
+    } cusift_image;
 
     /**
-     * @brief A grayscale image stored as a contiguous float buffer with padding (stride) between rows.
-     * This is an output structure used for the warping operations. If the caller wants to keep the
-     * warped images on the GPU, they can WarpImages_GPU(), which expects this structure.
-     * 
+     * @brief A grayscale float32 image in DEVICE memory with a row pitch, as
+     *        produced by cusift_warp_to_device() and cusift_align_and_warp_to_device().
      */
-    typedef struct 
+    typedef struct
     {
-        float *strided_img_;    /**< Pointer to row-major float32 pixel data with padding (for GPU warping). */
-        int width_;             /**< Image width in pixels. */
-        int height_;            /**< Image height in pixels. */
-        size_t stride_;         /**< Stride in bytes between rows (for GPU warping). */
-    } ImageStrided_t;
+        float *device_pixels; /**< Pitched device buffer. */
+        int width;            /**< Width in pixels. */
+        int height;           /**< Height in pixels. */
+        size_t pitch_bytes;   /**< Bytes between the starts of consecutive rows. */
+    } cusift_device_image;
 
     /**
-     * @brief Where the two input images land on the common canvas produced by
-     *        the warp functions.
+     * @brief Where the two inputs land on the common canvas produced by the warp
+     *        functions.
      *
      * The canvas is image 1's coordinate frame, extended so that it also holds
      * image 2 after transformation through the inverse homography. Canvas pixel
      * (0, 0) is image-1 coordinate (origin_u, origin_v); both are integers and
      * never positive, because image 1 is always kept whole. Every warp entry
      * point sizes its output with exactly this geometry, so the values here are
-     * bit-identical to what WarpImages() / WarpImages_GPU() and the fused
-     * pipelines use internally.
+     * bit-identical to what the warps use internally.
      *
      * Corners are listed in the order (0, 0), (w-1, 0), (w-1, h-1), (0, h-1) of
      * the source image, in canvas pixel coordinates, using the library's
      * pixel-centre convention (pixel (i, j) sits at point (i, j)). Image 1's
-     * corners are therefore integers: (-origin_u, -origin_v) and so on. Image 2's
-     * corners are the sub-pixel positions of its transformed corners. Note that
-     * the warp samples the half-open range [0, w-1) x [0, h-1) of each source,
-     * so the last column and row described by these corners hold NaN in the
-     * warped output.
+     * corners are therefore integers; image 2's are the sub-pixel positions of
+     * its transformed corners. The warp samples the half-open range
+     * [0, w-1) x [0, h-1) of each source, so the last column and row described
+     * by these corners hold NaN in the warped output.
      */
     typedef struct
     {
         int origin_u;           /**< Image-1 x coordinate of canvas pixel (0, 0); <= 0. */
         int origin_v;           /**< Image-1 y coordinate of canvas pixel (0, 0); <= 0. */
-        int canvas_width;       /**< Width of the warped images (outW). */
-        int canvas_height;      /**< Height of the warped images (outH). */
+        int canvas_width;       /**< Width of the warped images. */
+        int canvas_height;      /**< Height of the warped images. */
         float corners1[4][2];   /**< Image-1 corners on the canvas, (x, y) each. */
         float corners2[4][2];   /**< Image-2 corners on the canvas, (x, y) each. */
-    } WarpGeometry_t;
-    
+    } cusift_canvas;
 
     /**
-     * @brief Options controlling SIFT feature extraction.
+     * @brief Options for SIFT extraction. Fill with cusift_default_extract_options()
+     *        and change what you need.
      *
-     * These parameters govern the Difference-of-Gaussians (DoG) keypoint
-     * detector and the SIFT descriptor computation.  Typical defaults are
-     * shown in square brackets after each field.
-     *
-     * -- Detector thresholds ----------------------------------------------
-     *
-     *   thresh_        [~2.0-5.0]
-     *       Contrast threshold applied to DoG extrema.  A candidate
-     *       keypoint is accepted only when its absolute DoG response
-     *       exceeds this value.  Higher values reject low-contrast
-     *       features and produce fewer, more stable keypoints.
-     *       Lower values retain weaker features at the cost of more
-     *       noise. Think of a higher value as a bigger magnitude difference
-     *       between the keypoint and its neighbors in the DoG scale-space.
-     *
-     *   lowest_scale_  [~0.0]
-     *       Minimum feature scale (in pixels of the original image)
-     *       that will be kept.  Keypoints whose estimated scale is
-     *       below this cutoff are discarded.  Set to 0.0 to keep all
-     *       detected scales.  Increasing this suppresses very
-     *       fine-grained features.
-     *
-     *   edge_thresh_   [~10.0]
-     *       Edge rejection threshold (ratio of principal curvatures).
-     *       Candidates whose (trace²/determinant) of the 2×2 Hessian
-     *       exceeds this limit are considered edge responses rather
-     *       than corners and are discarded.  Lower values are stricter
-     *       (reject more edges); higher values are more permissive.
-     *       Lowe's original paper uses (r+1)²/r with r=10, giving
-     *       a value of ~12.1.
-     *
-     * -- Scale-space construction -----------------------------------------
-     *
-     *   init_blur_     [~1.0]
-     *       Sigma of the Gaussian pre-blur applied to the input
-     *       before the scale-space pyramid is built.  The pyramid's
-     *       own scales are measured *relative* to this pre-blurred
-     *       base image, so a keypoint reported at scale s sits at a
-     *       total blur of sqrt(init_blur_^2 + s^2).  Larger values
-     *       suppress fine detail and noise; 0.0 disables the
-     *       pre-blur and keeps the input as-is.  Any non-negative
-     *       value is valid.
-     *
-     *   num_octaves_   [5]
-     *       Number of octave levels in the scale-space pyramid.  Each
-     *       successive octave halves the image resolution.  The
-     *       library will silently clamp this to the maximum feasible
-     *       value based on the image dimensions (approximately
-     *       log2(min(width,height)) - 3), and emit a warning if the
-     *       requested count exceeds that limit.  More octaves detect
-     *       larger-scale features but increase computation.
-     *
-     * -- Capacity ---------------------------------------------------------
-     *
-     *   max_keypoints_ [~8192]
-     *       Maximum number of keypoints that will be returned.  This
-     *       controls the size of the pre-allocated SiftData buffers
-     *       on both host and device.  If the detector finds more
-     *       candidates than this limit, the excess are silently
-     *       dropped.  Set this high enough for your application to
-     *       avoid losing valid features.  Must be in
-     *       [1, INT_MAX / sizeof(SiftPoint)] (about 3.7 million);
-     *       other values are rejected with an error.
-     *
-     * -- Post-extraction filtering ----------------------------------------
-     *
-     *   scale_suppression_radius_  [0.0 = disabled]
-     *       When > 0, enables scale-based non-maximum suppression
-     *       after extraction.  For every detected keypoint, any
-     *       smaller-scale keypoint whose centre lies within
-     *       ``scale_suppression_radius_ * larger_scale`` pixels is
-     *       removed.  This keeps only the dominant-scale feature in
-     *       each spatial neighbourhood, eliminating redundant
-     *       detections of the same object at finer scales.
-     *
-     *       A value of 6.0 corresponds to the SIFT descriptor patch
-     *       radius and is a good starting point.  Set to 0.0 (the
-     *       default) to disable suppression entirely.
+     * contrast_threshold [2.0]: a Difference-of-Gaussians extremum is kept when
+     *   its absolute response exceeds this, in intensity units of the [0, 255]
+     *   input. Higher keeps fewer, more stable keypoints.
+     * lowest_scale [0.0], highest_scale [+inf]: keep only keypoints whose scale,
+     *   in pixels of the original image, lies in this range.
+     * edge_threshold [10.0]: candidates whose Hessian trace^2 / determinant
+     *   exceeds this are edge responses and are rejected. Lower is stricter.
+     * initial_blur [1.0]: sigma of the Gaussian applied to the input before the
+     *   scale-space pyramid is built. The pyramid's scales are relative to this
+     *   base, so a keypoint reported at scale s has total blur
+     *   sqrt(initial_blur^2 + s^2). 0 disables the pre-blur.
+     * max_keypoints [32768]: capacity of the keypoint buffers; detections beyond
+     *   it are dropped. Must be in [1, INT_MAX / sizeof(cusift_keypoint)].
+     * num_octaves [5]: pyramid depth; clamped to [3, 7] and to what the image
+     *   size supports (about log2(min(width, height)) - 3).
+     * scale_suppression_radius [0.0]: when > 0, every keypoint removes any
+     *   smaller-scale keypoint within radius * its_scale pixels, keeping one
+     *   detection per feature. 6.0 is a good starting value; 0 disables.
      */
     typedef struct
     {
-        float thresh_;          /**< Contrast threshold applied to DoG extrema. */
-        float lowest_scale_;    /**< Minimum feature scale (in pixels) to keep. */
-        float highest_scale_;   /**< Maximum feature scale (in pixels) to keep (+inf = no limit). */
-        float edge_thresh_;     /**< Edge rejection threshold (ratio of principal curvatures). */
-        float init_blur_;       /**< Assumed blur level (sigma) of the input image. */
-        int max_keypoints_;     /**< Maximum number of keypoints to return. */
-        int num_octaves_;       /**< Number of octave levels in the scale-space pyramid. */
-        float scale_suppression_radius_;  /**< Scale-NMS radius multiplier (0 = disabled). */
-    } ExtractSiftOptions_t;
+        float contrast_threshold;
+        float lowest_scale;
+        float highest_scale;
+        float edge_threshold;
+        float initial_blur;
+        int max_keypoints;
+        int num_octaves;
+        float scale_suppression_radius;
+    } cusift_extract_options;
+
+    /** @brief Geometric model fitted by cusift_estimate_homography(). */
+    typedef enum
+    {
+        CUSIFT_MODEL_HOMOGRAPHY = 0, /**< 8-DOF projective homography from 4-point samples. */
+        CUSIFT_MODEL_SIMILARITY = 1  /**< 4-DOF rotation + uniform scale + translation from 2-point samples; returned in the same 3x3 layout. */
+    } cusift_model;
+
+    /** @brief How to pick among several estimation attempts (see cusift_homography_options::attempts). */
+    typedef enum
+    {
+        CUSIFT_GOAL_MAX_INLIERS = 0,           /**< The attempt with the most RANSAC inliers. */
+        CUSIFT_GOAL_MIN_IDENTITY_DISTANCE = 1  /**< The attempt whose upper-left 2x2 block is closest to the identity (least rotation, scale and shear). */
+    } cusift_goal;
 
     /**
-     * @brief Model type for geometric estimation.
+     * @brief Options for homography estimation. Fill with
+     *        cusift_default_homography_options() and change what you need.
      *
-     * CUSIFT_MODEL_HOMOGRAPHY (0):
-     *     Full 8-DOF projective homography estimated from 4-point
-     *     correspondences via DLT + RANSAC.  Suitable for any planar
-     *     scene or camera motion.
-     *
-     * CUSIFT_MODEL_SIMILARITY (1):
-     *     4-DOF similarity transform (rotation + uniform scale +
-     *     translation) estimated from 2-point correspondences.
-     *     Much faster convergence when the scene is dominated by
-     *     translation with minimal rotation/scale and no shear or
-     *     perspective.  The resulting homography matrix has the form:
-     *         [ a  -b  tx ]
-     *         [ b   a  ty ]
-     *         [ 0   0   1 ]
-     *     where a = s*cos(theta), b = s*sin(theta).
+     * ransac_iterations [10000]: 4-point (or 2-point) hypotheses to test; rounded
+     *   up to a multiple of 16, at most 1 048 560.
+     * min_score [0.0], max_ambiguity [0.8]: a match takes part in RANSAC when its
+     *   score is above min_score and its ambiguity below max_ambiguity.
+     * inlier_threshold [3.0]: reprojection distance, in pixels, under which a
+     *   match counts as an inlier of a hypothesis. The inlier count reported by
+     *   the estimator is measured with this threshold.
+     * refine_iterations [5]: rounds of least-squares refinement over the inliers
+     *   after RANSAC; 0 keeps the raw 4-point hypothesis.
+     * refine_min_score [0.0], refine_max_ambiguity [0.8], refine_inlier_threshold [2.0]:
+     *   the same three gates for the refinement. The refinement also writes
+     *   match_error into every keypoint.
+     * seed [0]: seed of the random sampler; 0 draws from std::random_device,
+     *   anything else makes the estimate bit-for-bit repeatable.
+     * model [CUSIFT_MODEL_HOMOGRAPHY]: a cusift_model value.
+     * attempts [1]: run the whole estimate this many times with seed + k for
+     *   attempt k (fresh random seeds when seed is 0) and keep one by `goal`.
+     *   1 is a single estimate.
+     * goal [CUSIFT_GOAL_MAX_INLIERS]: a cusift_goal value, used when attempts > 1.
      */
-#define CUSIFT_MODEL_HOMOGRAPHY  0
-#define CUSIFT_MODEL_SIMILARITY  1
-
-#define CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS 0    /**< Goal: maximize the number of inliers. */
-#define CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF 1   /**< Goal: minimize the difference between the 2x2 submatrix of the homography and the identity matrix. */
-
     typedef struct
     {
-        int num_loops_;                 /**< Number of RANSAC iterations, in [1, 1048560]. */
-        float min_score_;               /**< Minimum match score to consider a correspondence. */
-        float max_ambiguity_;           /**< Maximum ambiguity for a correspondence to be considered. */
-        float thresh_;                  /**< Inlier distance threshold for RANSAC. */
+        int ransac_iterations;
+        float min_score;
+        float max_ambiguity;
+        float inlier_threshold;
+        int refine_iterations;
+        float refine_min_score;
+        float refine_max_ambiguity;
+        float refine_inlier_threshold;
+        unsigned int seed;
+        int model;
+        int attempts;
+        int goal;
+    } cusift_homography_options;
 
-        int improve_num_loops_;         /**< Number of iterative refinement rounds. */
-        float improve_min_score_;       /**< Minimum match score for a correspondence to participate in refinement. */
-        float improve_max_ambiguity_;   /**< Maximum ambiguity for a correspondence to participate in refinement. */
-        float improve_thresh_;          /**< Inlier distance threshold for refinement. */
+    /** @brief Fill *options with the documented defaults. */
+    CUSIFT_API void cusift_default_extract_options(cusift_extract_options *options);
 
-        unsigned int seed_; /**< Seed for the PRNG that generates random 4-point samples in RANSAC. 0 = non-deterministic (random_device) */
+    /** @brief Fill *options with the documented defaults. */
+    CUSIFT_API void cusift_default_homography_options(cusift_homography_options *options);
 
-        int model_type_;    /**< CUSIFT_MODEL_HOMOGRAPHY (0) or CUSIFT_MODEL_SIMILARITY (1). Default: 0. */
-    } FindHomographyOptions_t;
+    /* ===================================================================== */
+    /* Stages                                                                */
+    /* ===================================================================== */
 
     /**
-     * @brief Initialize the CUDA SIFT library. Must be called before any other functions. All it does it find a valid device.
+     * @brief Detect SIFT keypoints and compute their descriptors on the GPU.
      *
+     * @param image     Input image (host memory).
+     * @param keypoints Receives the keypoints; follows the ownership contract above.
+     * @param options   Extraction options.
      */
-    CUSIFT_API void InitializeCudaSift();
+    CUSIFT_API void cusift_extract(const cusift_image *image, cusift_keypoints *keypoints, const cusift_extract_options *options);
 
     /**
-     * @brief Extract SIFT features from an image. The caller is responsible for freeing the SiftData using DeleteSiftData() when done.
+     * @brief Match every keypoint of `query` against all keypoints of `train`.
      *
-     * @param image Pointer to the input image.
-     * @param sift_data Pointer to the SiftData structure where the extracted features will be stored. Must follow the SiftData ownership contract (zero-initialised before first use); any buffers it already holds from a previous call are released first.
-     * @param options Pointer to the ExtractSiftOptions_t structure containing extraction parameters.
+     * Brute-force cosine similarity on the GPU. For each query keypoint the
+     * best and second-best similarities become `score` and `ambiguity`
+     * (second / best), and `match`, `match_x`, `match_y` identify the best
+     * candidate. Every query keypoint receives its nearest neighbour; the
+     * ratio test is applied later through the max_ambiguity options. `train`
+     * is only read. A set may be matched against itself.
      */
-    CUSIFT_API void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options);
+    CUSIFT_API void cusift_match(cusift_keypoints *query, const cusift_keypoints *train);
 
     /**
-     * @brief Match SIFT features between two SiftData structures. The match results are stored in the 'match', 'match_xpos', 'match_ypos', and 'match_error' fields of the SiftPoint structures in data1. The caller is responsible for ensuring that data1 and data2 are properly initialized and contain valid SIFT features before calling this function.
+     * @brief Estimate the transform that maps the keypoints of `matched` onto
+     *        their matches: RANSAC followed by least-squares refinement.
      *
-     * @param data1 Pointer to the first SiftData structure.
-     * @param data2 Pointer to the second SiftData structure.
+     * `matched` must have been the `query` of cusift_match(). The result is a
+     * row-major 3x3 homography H with H[8] = 1 such that, for a keypoint at
+     * (x, y), H · (x, y, 1) is proportional to (match_x, match_y, 1). With
+     * CUSIFT_MODEL_SIMILARITY the matrix has the form [a -b tx; b a ty; 0 0 1].
+     * `inliers` receives the RANSAC inlier count of the winning hypothesis,
+     * measured with inlier_threshold. Fails with "Homography contains non-finite
+     * values" when fewer than 8 (homography) or 4 (similarity) candidates exist.
      */
-    CUSIFT_API void MatchSiftData(SiftData *data1, SiftData *data2);
+    CUSIFT_API void cusift_estimate_homography(cusift_keypoints *matched, float homography[9], int *inliers, const cusift_homography_options *options);
 
     /**
-     * @brief Find a homography transformation between matched SIFT features in the given SiftData structure. The homography is returned as a 3x3 matrix in row-major order in the 'homography' output parameter. The number of matches used to compute the homography is returned in the 'num_matches' output parameter. The caller is responsible for ensuring that the SiftData structure contains valid matched SIFT features before calling this function.
+     * @brief Compute, without warping anything, the canvas that cusift_warp()
+     *        and cusift_warp_to_device() would produce for a homography: its
+     *        size, its origin, and where the corners of both inputs land.
      *
-     * @param data Pointer to the SiftData structure containing matched SIFT features.
-     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
-     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param options Pointer to the FindHomographyOptions_t structure containing homography computation parameters.
+     * Host-only and constant-time (one 3x3 inverse and four point projections);
+     * it runs the same code the warps run internally, so the result matches a
+     * subsequent warp exactly. Typical uses: a pre-flight check of the output
+     * size, the exact device memory for a warp instead of the 2x bound of
+     * cusift_memory_warp(), and locating the overlap, seams or crop rectangles.
+     * See cusift_canvas for the meaning of each field.
+     *
+     * Errors mirror the warps: a non-finite or singular homography, non-positive
+     * dimensions, or a canvas larger than twice the larger input in either axis
+     * sets the error state. For the canvas-size errors *canvas is still
+     * filled so the rejected canvas can be inspected; otherwise it is zeroed.
      */
-    CUSIFT_API void FindHomography(SiftData *data, float *homography, int *num_matches, const FindHomographyOptions_t *options);
+    CUSIFT_API void cusift_compute_canvas(const float homography[9], int width1, int height1, int width2, int height2, cusift_canvas *canvas);
 
     /**
-     * @brief Given the computed homography, warp the input images to align them. The warped images are returned in the 'warped_image1' and 'warped_image2' output parameters. The caller is responsible for ensuring that the input images and homography are valid before calling this function, and for freeing any resources associated with the warped images when done.
-     * To free the warped images call the cstdlib free() function on the 'host_img_' field of the Image_t structures, and set the pointer to nullptr to avoid dangling pointers. We use malloc to allocate space for the warped images.
+     * @brief Warp both images onto the common canvas; outputs in host memory.
      *
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param homography Pointer to a 3x3 matrix in row-major order representing the homography transformation.
-     * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored.
-     * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored.
-     * @param useGPU Boolean flag indicating whether to use GPU acceleration for the warping operation.
+     * Image 1 is copied into the canvas unchanged (integer shift); image 2 is
+     * resampled through the homography with bilinear interpolation. Canvas
+     * pixels no source covers are NaN. The outputs are allocated with malloc;
+     * release them with cusift_image_free(). Fails with "warped image too
+     * large" when the canvas would exceed twice the larger input in either axis.
+     *
+     * @param use_gpu  true: warp on the GPU (both images are uploaded); false: OpenMP on the host.
      */
-    CUSIFT_API void WarpImages(const Image_t *image1, const Image_t *image2, const float *homography, Image_t *warped_image1, Image_t *warped_image2, bool useGPU);
+    CUSIFT_API void cusift_warp(const cusift_image *image1, const cusift_image *image2, const float homography[9], cusift_image *warped1, cusift_image *warped2, bool use_gpu);
 
     /**
-     * @brief Given the computed homography, warp the input images to align them using GPU acceleration.
-     * The warped images are returned in the 'warped_image1' and 'warped_image2' output parameters as ImageStrided_t structures, which contain pointers to GPU memory.
-     * The caller is responsible for ensuring that the input images and homography are valid before calling this function, and for freeing any resources associated
-     * with the warped images when done using FreeImage_GPU() or cudaFree() as appropriate.
-     * 
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param homography Pointer to a 3x3 matrix in row-major order representing the homography transformation.
-     * @param warped_image1 Pointer to the ImageStrided_t structure where the warped first image will be stored.
-     * @param warped_image2 Pointer to the ImageStrided_t structure where the warped second image will be stored.
+     * @brief As cusift_warp() on the GPU, but the two canvases stay in device
+     *        memory as pitched buffers. Release them with cusift_device_image_free().
      */
-    CUSIFT_API void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *homography, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2);
+    CUSIFT_API void cusift_warp_to_device(const cusift_image *image1, const cusift_image *image2, const float homography[9], cusift_device_image *warped1, cusift_device_image *warped2);
+
+    /* ===================================================================== */
+    /* Pipelines                                                             */
+    /* ===================================================================== */
 
     /**
-     * @brief Compute, without warping anything, the canvas that WarpImages() /
-     *        WarpImages_GPU() and the fused pipelines would produce for a given
-     *        homography: its size, its origin, and where the corners of both
-     *        input images land on it.
-     *
-     * This is a host-only, constant-time call (one 3x3 inverse and four point
-     * projections). It runs the same code the warp functions run internally, so
-     * the result matches a subsequent warp exactly. Typical uses: a pre-flight
-     * check of the output size before allocating, computing the exact VRAM
-     * needed for a warp instead of the 2x bound assumed by
-     * EstimateVramWarpImages(), and locating the overlap region, seams or
-     * crop rectangles after warping.
-     *
-     * Error behaviour mirrors the warp functions: a non-finite or singular
-     * homography, non-positive image dimensions, or a canvas larger than twice
-     * the larger input in either axis sets the error state (see
-     * CusiftHadError()). For the canvas-size errors the structure is still
-     * filled with the computed geometry so the caller can see what was
-     * rejected; for the other errors it is zeroed.
-     *
-     * @param homography     Row-major 3x3 homography mapping image-1 to image-2 coordinates.
-     * @param image_width1   Width of image 1 in pixels.
-     * @param image_height1  Height of image 1 in pixels.
-     * @param image_width2   Width of image 2 in pixels.
-     * @param image_height2  Height of image 2 in pixels.
-     * @param geometry       Receives the canvas size, origin and corner positions.
+     * @brief cusift_extract() on both images (same options) followed by
+     *        cusift_match(keypoints1, keypoints2).
      */
-    CUSIFT_API void ComputeWarpGeometry(const float *homography, int image_width1, int image_height1, int image_width2, int image_height2, WarpGeometry_t *geometry);
+    CUSIFT_API void cusift_extract_and_match(const cusift_image *image1, const cusift_image *image2, cusift_keypoints *keypoints1, cusift_keypoints *keypoints2, const cusift_extract_options *options);
 
     /**
-     * @brief Delete a SiftData structure and free all associated resources. After calling this function, the SiftData pointer should not be used again unless it is re-initialized. The caller is responsible for ensuring that the SiftData structure was properly initialized and contains valid data before calling this function.
-     *
-     * @param sift_data Pointer to the SiftData structure to be deleted.
+     * @brief Extract, match and estimate the homography from image 1 to image 2
+     *        in one call. The device-resident images are reused across stages.
+     *        Several attempts and the selection goal are controlled by the
+     *        homography options.
      */
-    CUSIFT_API void DeleteSiftData(SiftData *sift_data);
+    CUSIFT_API void cusift_align(const cusift_image *image1, const cusift_image *image2, cusift_keypoints *keypoints1, cusift_keypoints *keypoints2, const cusift_extract_options *extract_options, const cusift_homography_options *homography_options, float homography[9], int *inliers);
 
     /**
-     * @brief Free the pixel buffer owned by an Image_t structure.
-     *
-     * This is intended for images whose @c host_img_ was allocated by the
-     * library (e.g. the warped output images from WarpImages()).  After
-     * this call image->host_img_ is set to NULL and the dimensions
-     * are zeroed.
-     *
-     * @param image Pointer to the Image_t whose pixel buffer should be freed.
+     * @brief cusift_align() followed by the GPU warp, with the canvases
+     *        returned in host memory. The images already on the device for
+     *        extraction are reused as warp sources, so nothing is uploaded twice.
      */
-    CUSIFT_API void FreeImage(Image_t *image);
+    CUSIFT_API void cusift_align_and_warp(const cusift_image *image1, const cusift_image *image2, cusift_keypoints *keypoints1, cusift_keypoints *keypoints2, const cusift_extract_options *extract_options, const cusift_homography_options *homography_options, float homography[9], int *inliers, cusift_image *warped1, cusift_image *warped2);
+
+    /** @brief As cusift_align_and_warp(), with the canvases left in device memory. */
+    CUSIFT_API void cusift_align_and_warp_to_device(const cusift_image *image1, const cusift_image *image2, cusift_keypoints *keypoints1, cusift_keypoints *keypoints2, const cusift_extract_options *extract_options, const cusift_homography_options *homography_options, float homography[9], int *inliers, cusift_device_image *warped1, cusift_device_image *warped2);
+
+    /* ===================================================================== */
+    /* Resources                                                             */
+    /* ===================================================================== */
+
+    /** @brief Release both buffers of a keypoint set and zero it. Safe on an empty set. Leaves the error state alone. */
+    CUSIFT_API void cusift_keypoints_free(cusift_keypoints *keypoints);
+
+    /** @brief Release a host image allocated by the library (a warp output) and zero it. */
+    CUSIFT_API void cusift_image_free(cusift_image *image);
+
+    /** @brief Release a device image allocated by the library and zero it. */
+    CUSIFT_API void cusift_device_image_free(cusift_device_image *image);
+
+    /** @brief Write the host copy of a keypoint set, descriptors included, to a JSON file. */
+    CUSIFT_API void cusift_keypoints_save_json(const char *path, const cusift_keypoints *keypoints);
+
+    /* ===================================================================== */
+    /* Device memory estimates                                               */
+    /* ===================================================================== */
 
     /**
-     * @brief Free the pixel buffer owned by an ImageStrided_t structure.
-     *
-     * This is intended for images whose @c strided_img_ was allocated by the
-     * library (e.g. the warped output images from WarpImages_GPU()).  After
-     * this call image->strided_img_ is set to NULL and the dimensions
-     * are zeroed.
-     *
-     * @param image Pointer to the ImageStrided_t whose pixel buffer should be freed.
+     * @brief Peak device memory, in bytes, that cusift_extract() needs for an
+     *        image of this size with these options (keypoint buffer, image copy,
+     *        scale-space pyramid, sort temporaries, context).
      */
-    CUSIFT_API void FreeImage_GPU(ImageStrided_t *image);
+    CUSIFT_API size_t cusift_memory_extract(int width, int height, const cusift_extract_options *options);
+
+    /** @brief Device memory held by two keypoint sets of these capacities during matching (matching allocates nothing else). */
+    CUSIFT_API size_t cusift_memory_match(int capacity1, int capacity2);
+
+    /** @brief Device memory that cusift_estimate_homography() needs: the keypoint set plus the RANSAC temporaries. */
+    CUSIFT_API size_t cusift_memory_homography(int capacity, const cusift_homography_options *options);
 
     /**
-     * @brief Save SIFT features from a SiftData structure to a json file.
-     *
-     * @param filename Pointer to the name of the file where the SIFT features will be saved.
-     * @param sift_data Pointer to the SiftData structure containing the SIFT features to be saved.
+     * @brief Peak device memory of a GPU warp, assuming the worst-case canvas of
+     *        twice the larger input in each axis. cusift_compute_canvas() gives
+     *        the exact canvas once the homography is known.
      */
-    CUSIFT_API void SaveSiftData(const char *filename, const SiftData *sift_data);
+    CUSIFT_API size_t cusift_memory_warp(int width1, int height1, int width2, int height2);
 
-    /**
-     * @brief Extract Sift features from two images and match them. This is a convenience function that combines ExtractSiftFromImage() and MatchSiftData() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
-     *
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     */
-    CUSIFT_API void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options);
-
-    /**
-     * @brief Extract Sift features from two images, match them, and find a homography transformation between the matched features. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), and FindHomography() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
-     *
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
-     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
-     */
-    CUSIFT_API void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
-
-    /**
-    * @brief Extract Sift features from two images, match them, and find a homography transformation between the matched features using GPU acceleration. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), and FindHomography() into a single call, with GPU acceleration for all stages. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done.
-    *
-    * @param image1 Pointer to the first input image.
-    * @param image2 Pointer to the second input image.
-    * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-    * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-    * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
-    * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-    * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-    * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
-    * @param num_homography_attempts Integer specifying the number of homography estimation attempts to perform. The library will run the homography estimation process multiple times with different random seeds and return the best result based on the number of inliers or the average inlier error. This can improve robustness against outliers and increase the chances of finding a good homography, especially in challenging scenarios with few matches or high noise. Set this to 1 for a single attempt (default), or higher for more attempts at the cost of increased computation time.
-    * @param homography_goal Integer specifying the goal for homography estimation. Use CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS to maximize the number of inliers, or CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF to minimize the difference between the 2x2 submatrix of the homography and the identity matrix, giving more wiegth to homographies that minimize rotation shear and scale.
-    */
-    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, int num_homography_attempts, int homography_goal);
-
-    /**
-     * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done.
-     * This function is useful for applications that require both feature matching and image alignment, such as panorama stitching or object recognition. It provides a streamlined interface for performing the entire workflow with a single function call.
-     *
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
-     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
-     * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
-     * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
-     */
-    CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2);
-
-    /**
-     * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them using GPU acceleration.
-     * This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages_GPU() into a single call.
-     * The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done using FreeImage_GPU() or cudaFree() as appropriate.
-     * 
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
-     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
-     * @param warped_image1 Pointer to the ImageStrided_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
-     * @param warped_image2 Pointer to the ImageStrided_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
-     * 
-     */
-    CUSIFT_API void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2);
-
-    /**
-     * @brief Full pipeline: Extract Sift features from two images, match them, find a homography transformation between the matched features, and warp the input images to align them. This is a convenience function that combines ExtractSiftFromImage(), MatchSiftData(), FindHomography(), and WarpImages() into a single call. The caller is responsible for freeing the SiftData structures using DeleteSiftData() when done, and for freeing any resources associated with the warped images when done.
-     * This function is useful for applications that require both feature matching and image alignment, such as panorama stitching or object recognition. It provides a streamlined interface for performing the entire workflow with a single function call.
-     *
-     * @param image1 Pointer to the first input image.
-     * @param image2 Pointer to the second input image.
-     * @param sift_data1 Pointer to the SiftData structure where the extracted features from the first image will be stored.
-     * @param sift_data2 Pointer to the SiftData structure where the extracted features from the second image will be stored.
-     * @param homography Pointer to a 3x3 matrix in row-major order where the computed homography will be stored.
-     * @param num_matches Pointer to an integer where the number of matches used to compute the homography will be stored.
-     * @param extract_options Pointer to the ExtractSiftOptions_t structure containing parameters for SIFT feature extraction. The same options will be used for both images.
-     * @param homography_options Pointer to the FindHomographyOptions_t structure containing parameters for homography computation.
-     * @param warped_image1 Pointer to the Image_t structure where the warped first image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
-     * @param warped_image2 Pointer to the Image_t structure where the warped second image will be stored. The caller is responsible for freeing any resources associated with the warped images when done.
-     * @param num_homography_attempts Integer specifying the number of homography estimation attempts to perform. The library will run the homography estimation process multiple times with different random seeds and return the best result based on the number of inliers or the average inlier error. This can improve robustness against outliers and increase the chances of finding a good homography, especially in challenging scenarios with few matches or high noise. Set this to 1 for a single attempt (default), or higher for more attempts at the cost of increased computation time.
-     * @param homography_goal Integer specifying the goal for homography estimation. Use CUSIFT_HOMOGRAPHY_GOAL_MAX_INLIERS to maximize the number of inliers, or CUSIFT_HOMOGRAPHY_GOAL_MIN_EYE_DIFF to minimize the difference between the 2x2 submatrix of the homography and the identity matrix, giving more wiegth to homographies that minimize rotation shear and scale.
-     */
-    CUSIFT_API void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal);
-
-    // ── VRAM estimation functions ────────────────────────────────────────
-
-    /**
-     * @brief Estimate the peak GPU VRAM needed by ExtractSiftFromImage().
-     *
-     * Accounts for the SiftData device buffer, the CudaImage device copy,
-     * the scale-space / Laplace pyramid temporary memory, and the small
-     * per-call context buffers.
-     *
-     * @param image_width   Width of the input image in pixels.
-     * @param image_height  Height of the input image in pixels.
-     * @param options       Extraction options (max_keypoints_ and num_octaves_ are used).
-     * @return Estimated peak VRAM in bytes.
-     */
-    CUSIFT_API size_t EstimateVramExtractSift(int image_width, int image_height, const ExtractSiftOptions_t *options);
-
-    /**
-     * @brief Estimate the GPU VRAM occupied by two SiftData arrays during matching.
-     *
-     * MatchSiftData itself allocates no extra device memory; this returns the
-     * size of the two pre-existing device-side keypoint buffers.
-     *
-     * @param max_keypoints1 Maximum keypoints allocated for the first SiftData.
-     * @param max_keypoints2 Maximum keypoints allocated for the second SiftData.
-     * @return Estimated VRAM in bytes.
-     */
-    CUSIFT_API size_t EstimateVramMatchSift(int max_keypoints1, int max_keypoints2);
-
-    /**
-     * @brief Estimate the GPU VRAM needed by FindHomography().
-     *
-     * Accounts for the temporary coordinate, random-sample, and homography
-     * candidate buffers allocated during RANSAC, plus the pre-existing
-     * SiftData device buffer.
-     *
-     * @param max_keypoints Maximum number of keypoints (worst-case numPts).
-     * @param options       Homography options (num_loops_ is used).
-     * @return Estimated VRAM in bytes.
-     */
-    CUSIFT_API size_t EstimateVramFindHomography(int max_keypoints, const FindHomographyOptions_t *options);
-
-    /**
-     * @brief Estimate the GPU VRAM needed by WarpImages() (GPU path) or WarpImages_GPU().
-     *
-     * Because the output canvas size depends on the homography (which is
-     * unknown before extraction), this function assumes worst-case output
-     * dimensions of 2x the larger input dimension in each axis. Once the
-     * homography is known, ComputeWarpGeometry() gives the exact canvas size
-     * and therefore the exact output allocation.
-     *
-     * @param image_width1   Width of the first input image.
-     * @param image_height1  Height of the first input image.
-     * @param image_width2   Width of the second input image.
-     * @param image_height2  Height of the second input image.
-     * @return Estimated peak VRAM in bytes.
-     */
-    CUSIFT_API size_t EstimateVramWarpImages(int image_width1, int image_height1, int image_width2, int image_height2);
-
-    /**
-     * @brief Estimate the peak GPU VRAM across the full extract-match-homography-warp pipeline.
-     *
-     * The peak typically occurs during SIFT extraction (due to the
-     * scale-space pyramid).  This function returns the maximum of all
-     * individual stage estimates, accounting for buffers that coexist.
-     *
-     * @param image_width1       Width of the first input image.
-     * @param image_height1      Height of the first input image.
-     * @param image_width2       Width of the second input image.
-     * @param image_height2      Height of the second input image.
-     * @param extract_options    Extraction options.
-     * @param homography_options Homography options.
-     * @return Estimated peak VRAM in bytes.
-     */
-    CUSIFT_API size_t EstimateVramFullPipeline(int image_width1, int image_height1, int image_width2, int image_height2, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options);
+    /** @brief Peak device memory across cusift_align_and_warp(): the maximum over its stages. */
+    CUSIFT_API size_t cusift_memory_pipeline(int width1, int height1, int width2, int height2, const cusift_extract_options *extract_options, const cusift_homography_options *homography_options);
 
 #ifdef __cplusplus
 }

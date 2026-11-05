@@ -189,28 +189,28 @@ def main(argv: list[str] | None = None) -> None:
         improve_num_loops = trial.suggest_int("improve_num_loops", 20, 300, step=20)
 
         extract_opts = ExtractOptions(
-            thresh=thresh,
+            contrast_threshold=thresh,
             lowest_scale=lowest_scale,
-            edge_thresh=edge_thresh,
-            init_blur=init_blur,
+            edge_threshold=edge_thresh,
+            initial_blur=init_blur,
             max_keypoints=65536,
             num_octaves=num_octaves,
         )
         homography_opts = HomographyOptions(
-            num_loops=num_loops,
+            ransac_iterations=num_loops,
             min_score=0.0,
             max_ambiguity=max_ambiguity,
-            thresh=ransac_thresh,
-            improve_min_score=0.0,
-            improve_max_ambiguity=improve_max_ambiguity,
-            improve_thresh=improve_thresh,
+            inlier_threshold=ransac_thresh,
+            refine_min_score=0.0,
+            refine_max_ambiguity=improve_max_ambiguity,
+            refine_inlier_threshold=improve_thresh,
             seed=args.seed,  # non-deterministic inside RANSAC for diversity
-            improve_num_loops=improve_num_loops,
+            refine_iterations=improve_num_loops,
         )
 
         try:
             kp1, kp2, matches, H, n_inliers, w1, w2 = (
-                sift.extract_and_match_and_find_homography_and_warp(
+                sift.align_and_warp(
                     img1_str,
                     img2_str,
                     extract_options=extract_opts,
@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print("\nRe-running best configuration ...")
     kp1, kp2, matches, H, n_inliers, warped1, warped2 = (
-        sift.extract_and_match_and_find_homography_and_warp(
+        sift.align_and_warp(
             img1_str,
             img2_str,
             extract_options=extract_opts,

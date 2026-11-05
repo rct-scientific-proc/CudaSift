@@ -8,7 +8,7 @@ Example
 >>> kp1 = sift.extract("photo1.png")
 >>> kp2 = sift.extract("photo2.png")
 >>> matches = sift.match(kp1, kp2)
->>> H, n_inliers = sift.find_homography(kp1)
+>>> H, n_inliers = sift.estimate_homography(kp1)
 """
 
 from cusift.cusift import (
@@ -16,15 +16,15 @@ from cusift.cusift import (
     CuSiftError,
     ErrorRecord,
     ExtractOptions,
-    HOMOGRAPHY_GOAL_MAX_INLIERS,
-    HOMOGRAPHY_GOAL_MIN_EYE_DIFF,
+    GOAL_MAX_INLIERS,
+    GOAL_MIN_IDENTITY_DISTANCE,
     HomographyOptions,
     Keypoint,
-    KeypointList,
+    Keypoints,
     MatchResult,
     MODEL_HOMOGRAPHY,
     MODEL_SIMILARITY,
-    WarpGeometry,
+    Canvas,
 )
 
 __all__ = [
@@ -32,13 +32,13 @@ __all__ = [
     "CuSiftError",
     "ErrorRecord",
     "ExtractOptions",
-    "HOMOGRAPHY_GOAL_MAX_INLIERS",
-    "HOMOGRAPHY_GOAL_MIN_EYE_DIFF",
+    "GOAL_MAX_INLIERS",
+    "GOAL_MIN_IDENTITY_DISTANCE",
     "HomographyOptions",
     "Keypoint",
-    "KeypointList",
+    "Keypoints",
     "MatchResult",
     "MODEL_HOMOGRAPHY",
     "MODEL_SIMILARITY",
-    "WarpGeometry",
+    "Canvas",
 ]

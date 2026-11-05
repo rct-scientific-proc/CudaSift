@@ -1,14 +1,16 @@
 # CudaSift
 
 GPU-accelerated SIFT feature extraction, descriptor matching, RANSAC homography
-estimation, and image warping &mdash; exposed as a small, stable C API
-(`cusift.h`) usable from C, C++, and Python.
+estimation, and image warping onto a common canvas &mdash; exposed as a small,
+stable C API (`cusift.h`, every symbol prefixed `cusift_`) usable from C, C++,
+and Python.
 
 This is a maintained fork of Mårten Björkman's
 [Celebrandil/CudaSift](https://github.com/Celebrandil/CudaSift), restructured
-into a proper library with a clean public interface, end-to-end convenience
-functions, deterministic RANSAC, error reporting, VRAM estimation, and Python
-bindings.
+into a proper library with a clean public interface, fused pipelines,
+deterministic RANSAC, error reporting, device-memory estimation, and Python
+bindings. Version 3.0 renamed the whole public surface; see
+[docs/migration-3.0.md](docs/migration-3.0.md) for the old-to-new tables.
 
 ---
 
@@ -16,21 +18,23 @@ bindings.
 
 - **SIFT detection and 128-d descriptors** on the GPU using the original
   CudaSift Difference-of-Gaussians pyramid and Lowe's descriptor.
-- **Brute-force descriptor matching** with Lowe's ratio test, fully on the GPU.
-- **RANSAC** estimators for both
-  - 8-DOF projective **homography** (4-point DLT), and
-  - 4-DOF **similarity** transform (rotation + uniform scale + translation,
-    2-point closed-form).
-- **Iterative refinement** of the estimated homography (IRLS with binary Huber
-  weighting, AVX2/FMA on the host).
-- **Image warping** to a common canvas (CPU or GPU paths).
-- **Convenience pipelines** that fuse extract &rarr; match &rarr; homography
-  &rarr; warp into a single call.
-- **VRAM estimation** for every stage so callers can pre-flight their memory
-  budget before allocating.
-- **Out-of-band error reporting**: every API call sets a thread-local
-  `(file, line, message)` triple instead of `throw`/`assert`, making it easy
-  to use from C and other languages.
+- **Brute-force descriptor matching** on the GPU, recording the best and
+  second-best similarity per keypoint for the ratio test.
+- **RANSAC** estimators for both an 8-DOF projective **homography** (4-point
+  DLT) and a 4-DOF **similarity** transform (2-point closed form), followed by
+  **least-squares refinement** over the inliers (AVX2/FMA on x86 hosts).
+- **Image warping** to a common canvas (CPU or GPU), plus the canvas geometry
+  on its own: size, origin and where each image's corners land.
+- **Pipelines** that fuse extract, match, estimate and warp into one call,
+  reusing the device-resident images across stages.
+- **Error reporting without exceptions or return codes**: a thread-local error
+  record after every call, an optional size-capped log file, and an optional
+  callback, so the library is usable from C and from other languages.
+- **Device-memory estimation** for every stage, so callers can pre-flight
+  their budget before allocating.
+- **Embedded-ready**: validated inputs, no silent clamps, every allocation
+  checked, a process-local device reset for recovery from sticky CUDA errors,
+  and a build default that covers every GPU the toolkit supports.
 - **Python bindings** via `ctypes`, packaged under `cusift_py/`.
 - **Concurrency-safe**: per-call device contexts replace the original
   `__constant__` / `__device__` globals, so multiple host threads or processes
@@ -56,8 +60,13 @@ test/
     speed.cpp                Multi-resolution benchmarking harness
     img1.png, img2.png       Sample image pair
 docs/
+    migration-3.0.md         2.x -> 3.0 rename tables
+    image-stitching-with-homography.pdf
+                             How the library goes from matches to aligned canvases
+    common-canvas-mathematics.pdf
+                             The projective geometry of the canvas and the warp
     kernel-correctness-fixes-v2.3.0.md
-                             v2.3.0 kernel fixes, and what init_blur_ means
+                             v2.3.0 kernel fixes, and what initial_blur means
 cusift_py/
     cusift/                  Python package (ctypes bindings)
 examples/
@@ -71,9 +80,9 @@ cmake/
 
 - CUDA Toolkit 11.0 or newer (tested against 13.x).
 - A C++17 compiler (MSVC 2019+, GCC 9+, Clang 10+).
-- AVX2/FMA-capable CPU (Haswell, Zen, or newer) for the host-side
-  `ImproveHomography` path.
 - CMake 3.23 or newer.
+- (Optional) An AVX2/FMA-capable x86 CPU for the vectorised refinement path;
+  other hosts use the scalar fallback.
 - (Optional) Python 3.8+ for `cusift_py`.
 
 By default the build compiles one cubin per **major** architecture your
@@ -100,6 +109,7 @@ CMake options:
 | `CUSIFT_BUILD_SHARED`   | `OFF`   | Build `cusift` as a shared library (DLL/.so).   |
 | `CUSIFT_USE_FAST_MATH`  | `OFF`   | Compile CUDA with `--use_fast_math`.            |
 | `CUSIFT_ALL_CUDA_ARCHS` | `OFF`   | Build for every architecture supported by NVCC. |
+| `CUSIFT_ENABLE_AVX2`    | `ON`    | Vectorise the refinement on x86 hosts.          |
 
 To install:
 
@@ -136,60 +146,52 @@ For benchmarking across multiple input resolutions:
 
 ```cpp
 #include "cusift.h"
-#include <limits>
 #include <vector>
 #include <cstdio>
 
 int main()
 {
-    InitializeCudaSift();
+    cusift_init();
 
-    // Load two grayscale float32 images (row-major, [0, 255]).
+    // Two grayscale float32 images, row-major, values in [0, 255], in host memory.
     std::vector<float> img1, img2;
     int w1, h1, w2, h2;
     /* ... fill in img1, img2, w1/h1, w2/h2 ... */
 
-    Image_t in1{img1.data(), w1, h1};
-    Image_t in2{img2.data(), w2, h2};
+    cusift_image in1{img1.data(), w1, h1};
+    cusift_image in2{img2.data(), w2, h2};
 
-    ExtractSiftOptions_t extract_opts{};
-    extract_opts.thresh_                    = 2.0f;
-    extract_opts.lowest_scale_              = 0.0f;
-    extract_opts.highest_scale_             = std::numeric_limits<float>::infinity();
-    extract_opts.edge_thresh_               = 10.0f;
-    extract_opts.init_blur_                 = 1.0f;
-    extract_opts.max_keypoints_             = 10000;
-    extract_opts.num_octaves_               = 5;
-    extract_opts.scale_suppression_radius_  = 0.0f;
+    cusift_extract_options extract_opts;
+    cusift_default_extract_options(&extract_opts);
+    extract_opts.contrast_threshold = 2.0f;
 
-    FindHomographyOptions_t homog_opts{};
-    homog_opts.num_loops_         = 10000;
-    homog_opts.thresh_            = 3.0f;
-    homog_opts.improve_num_loops_ = 5;
-    homog_opts.improve_thresh_    = 2.0f;
-    homog_opts.seed_              = 42;          // deterministic; 0 = random_device
-    homog_opts.model_type_        = CUSIFT_MODEL_HOMOGRAPHY;
+    cusift_homography_options homography_opts;
+    cusift_default_homography_options(&homography_opts);
+    homography_opts.seed = 42;        // repeatable; 0 draws a random seed
 
-    SiftData s1{}, s2{};
-    float    H[9];
-    int      num_matches = 0;
+    cusift_keypoints kp1{}, kp2{};    // zero-initialise once; reusable across calls
+    float H[9];
+    int inliers = 0;
 
-    ExtractAndMatchAndFindHomography(&in1, &in2, &s1, &s2, H, &num_matches,
-                                     &extract_opts, &homog_opts);
+    cusift_align(&in1, &in2, &kp1, &kp2, &extract_opts, &homography_opts, H, &inliers);
 
-    if (CusiftHadError()) {
-        int line; char file[256], msg[256];
-        CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
-        std::fprintf(stderr, "%s:%d  %s\n", file, line, msg);
+    cusift_error_record err;
+    if (cusift_last_error(&err)) {
+        std::fprintf(stderr, "%s: %s (%s:%d)\n", err.function, err.message, err.file, err.line);
         return 1;
     }
 
-    /* H is a row-major 3x3, num_matches is the inlier count. */
+    /* H is a row-major 3x3 mapping image-1 to image-2 coordinates;
+       inliers is the RANSAC inlier count. */
 
-    DeleteSiftData(&s1);
-    DeleteSiftData(&s2);
+    cusift_keypoints_free(&kp1);
+    cusift_keypoints_free(&kp2);
 }
 ```
+
+To get the two images on a common canvas as well, call `cusift_align_and_warp`
+with two extra `cusift_image` outputs (release them with `cusift_image_free`),
+or `cusift_align_and_warp_to_device` to keep them on the GPU.
 
 The build exports a `cusift::cusift` CMake target you can consume from a
 downstream project after `find_package(cusift CONFIG REQUIRED)` (the install
@@ -206,67 +208,68 @@ target_link_libraries(my_app PRIVATE cusift::cusift)
 ```python
 import numpy as np
 from PIL import Image
-from cusift import (
-    InitializeCudaSift,
-    ExtractAndMatchAndFindHomography,
-    ExtractSiftOptions, FindHomographyOptions,
-)
+from cusift import CuSift, HomographyOptions
 
-InitializeCudaSift()
+sift = CuSift()                      # finds build/Release/cusift.dll or libcusift.so
 
 img1 = np.asarray(Image.open("test/img1.png").convert("L"), dtype=np.float32)
 img2 = np.asarray(Image.open("test/img2.png").convert("L"), dtype=np.float32)
 
-extract_opts    = ExtractSiftOptions()
-homography_opts = FindHomographyOptions()
+kp1, kp2, matches, H, inliers = sift.align(
+    img1, img2, homography_options=HomographyOptions(seed=42))
+print(f"{len(kp1)} and {len(kp2)} keypoints, {inliers} inliers, H =\n{H}")
+kp1.free(); kp2.free()
 
-H, num_matches, sift1, sift2 = ExtractAndMatchAndFindHomography(
-    img1, img2, extract_opts, homography_opts,
-)
-print(f"Found {num_matches} inliers, H =\n{H}")
+# or stage by stage
+kp1, kp2 = sift.extract(img1), sift.extract(img2)
+matches = sift.match(kp1, kp2)
+H, inliers = sift.estimate_homography(kp1)
+warped1, warped2 = sift.warp(img1, img2, H)       # NaN where no source covers a pixel
+canvas = sift.compute_canvas(H, *img1.shape[::-1], *img2.shape[::-1])
 ```
 
-See `cusift_py/cusift/cusift.py` for the full Python surface and
-`cusift_py/test.py` for a runnable example.
+`ExtractOptions` and `HomographyOptions` carry the same field names and
+defaults as the C structs. See `cusift_py/cusift/cusift.py` for the full
+surface and `cusift_py/test.py` for a runnable example.
 
-## API surface (overview)
+## API surface
 
 All public functions live in [`include/cusift.h`](include/cusift.h) and are
-documented inline. The big picture:
+documented inline.
 
-| Function                                         | Purpose                                            |
-| ------------------------------------------------ | -------------------------------------------------- |
-| `InitializeCudaSift`                             | Pick a CUDA device. Call once.                     |
-| `ExtractSiftFromImage`                           | DoG + descriptor extraction.                       |
-| `MatchSiftData`                                  | Brute-force descriptor matching with ratio test.   |
-| `FindHomography`                                 | RANSAC homography or similarity, with refinement.  |
-| `WarpImages` / `WarpImages_GPU`                  | Warp both images to a common canvas.               |
-| `ComputeWarpGeometry`                            | Canvas size, origin and corner positions for an H. |
-| `ExtractAndMatchSift`                            | Convenience: extract both + match.                 |
-| `ExtractAndMatchAndFindHomography`               | Convenience: extract + match + RANSAC.             |
-| `ExtractAndMatchAndFindHomography_Multi`         | Multi-attempt RANSAC with goal-based selection.    |
-| `ExtractAndMatchAndFindHomographyAndWarp[_GPU]`  | Full pipeline through to warped output.            |
-| `ExtractAndMatchAndFindHomography_Multi_AndWarp` | Multi-attempt full pipeline.                       |
-| `SaveSiftData`                                   | Persist a `SiftData` to JSON.                      |
-| `DeleteSiftData`, `FreeImage`, `FreeImage_GPU`   | Resource cleanup.                                  |
-| `CusiftHadError`, `CusiftGetLastErrorString`     | Error reporting.                                   |
-| `CusiftResetDevice`                              | Process-local context reset after a sticky CUDA error. |
-| `CusiftSetErrorLog`, `CusiftSetErrorCallback`    | Append every error to a file and/or deliver it to a callback. |
-| `CusiftErrorLogDroppedCount`                     | Records the log could not write.                   |
-| `EstimateVram*`                                  | Pre-flight VRAM accounting for every stage.        |
+| Function | Purpose |
+| --- | --- |
+| `cusift_version`, `cusift_init`, `cusift_device_reset` | Library version; device selection; process-local recovery from a sticky CUDA error. |
+| `cusift_last_error`, `cusift_set_error_log`, `cusift_set_error_callback`, `cusift_error_log_dropped` | Error reporting: thread-local record, log file, callback. |
+| `cusift_default_extract_options`, `cusift_default_homography_options` | Fill an options struct with the documented defaults. |
+| `cusift_extract` | DoG detection + descriptors. |
+| `cusift_match` | Brute-force descriptor matching of a query set against a train set. |
+| `cusift_estimate_homography` | RANSAC homography or similarity with refinement; several attempts via the options. |
+| `cusift_compute_canvas` | Canvas size, origin and corner positions for a homography, without warping. |
+| `cusift_warp`, `cusift_warp_to_device` | Warp both images to the common canvas, output on the host or the device. |
+| `cusift_extract_and_match`, `cusift_align`, `cusift_align_and_warp`, `cusift_align_and_warp_to_device` | Fused pipelines. |
+| `cusift_keypoints_free`, `cusift_image_free`, `cusift_device_image_free` | Resource release. |
+| `cusift_keypoints_save_json` | Persist a keypoint set, descriptors included. |
+| `cusift_memory_extract`, `_match`, `_homography`, `_warp`, `_pipeline` | Pre-flight device-memory accounting per stage. |
 
 ## Error handling
 
-The library never throws across the C boundary. Every public function clears
-the thread-local error flag on entry; check it after the call:
+The library never throws across the C boundary and never returns error codes.
+Every public function (except the resource-release and error-sink setters)
+clears the thread-local error state on entry; ask for it after the call:
 
 ```c
-if (CusiftHadError()) {
-    int line; char file[256], msg[256];
-    CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
-    /* report and recover */
+cusift_error_record err;
+if (cusift_last_error(&err)) {
+    /* err.function, err.file, err.line, err.cuda_error, err.cuda_error_name,
+       err.message; the strings stay valid until the next library call on
+       this thread */
 }
 ```
+
+Argument problems (NULL pointers, out-of-range options, images outside
+8 to 65535 pixels per side, a cudaMalloc pointer passed as a host image) are
+reported the same way rather than by crashing.
 
 ### Error log and callback
 
@@ -276,10 +279,10 @@ cleanup), can also be appended to a file and delivered to a callback,
 independent of the thread-local state:
 
 ```c
-CusiftSetErrorLog("", 0);                        /* "" = <temp dir>/cusift-errors.log, 0 = 1 MiB cap */
-CusiftSetErrorLog("/var/log/cusift.log", 4u << 20);
-CusiftSetErrorLog(NULL, 0);                      /* off (the default) */
-CusiftSetErrorCallback(my_handler, user_data);   /* NULL disables */
+cusift_set_error_log("", 0);                        /* "" = <temp dir>/cusift-errors.log, 0 = 1 MiB cap */
+cusift_set_error_log("/var/log/cusift.log", 4u << 20);
+cusift_set_error_log(NULL, 0);                      /* off (the default) */
+cusift_set_error_callback(my_handler, user_data);   /* NULL disables */
 ```
 
 Each line carries a UTC timestamp, severity, thread id, the public function,
@@ -287,25 +290,24 @@ source location, CUDA error code and name, and the message. When a line would
 push the file past the cap, the file is renamed to `<path>.1` and restarted, so
 disk use is bounded at twice the cap. Logging never fails the call being
 logged; records that could not be written are counted by
-`CusiftErrorLogDroppedCount()`. The file can also be enabled without a code
+`cusift_error_log_dropped()`. The file can also be enabled without a code
 change through `CUSIFT_ERROR_LOG=<path>` (or `default`) and
-`CUSIFT_ERROR_LOG_MAX_BYTES`, read on the first error if `CusiftSetErrorLog`
+`CUSIFT_ERROR_LOG_MAX_BYTES`, read on the first error if `cusift_set_error_log`
 was never called.
 
-## VRAM estimation
+## Device memory estimation
 
-The `EstimateVram*` family lets you size your GPU budget without actually
-allocating anything:
+The `cusift_memory_*` family sizes the GPU budget without allocating anything:
 
 ```c
-size_t bytes = EstimateVramFullPipeline(w1, h1, w2, h2,
-                                        &extract_opts,
-                                        &homography_opts);
+size_t bytes = cusift_memory_pipeline(w1, h1, w2, h2, &extract_opts, &homography_opts);
 ```
 
 The peak typically occurs during SIFT extraction (the scale-space pyramid).
 Returned values include all temporary buffers as well as the caller-visible
-`SiftData` and warped-image allocations.
+keypoint and warped-image allocations. Once a homography is known,
+`cusift_compute_canvas` gives the exact warp output size instead of the 2x
+bound the estimate assumes.
 
 ## License
 

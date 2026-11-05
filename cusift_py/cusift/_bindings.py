@@ -17,12 +17,12 @@ from pathlib import Path
 # -- ctypes struct mirrors of cusift.h ----------------------------------------
 
 
-class SiftPoint(Structure):
-    """Mirror of the C ``SiftPoint`` struct."""
+class cusift_keypoint(Structure):
+    """Mirror of the C ``cusift_keypoint`` struct."""
 
     _fields_ = [
-        ("xpos", c_float),
-        ("ypos", c_float),
+        ("x", c_float),
+        ("y", c_float),
         ("scale", c_float),
         ("sharpness", c_float),
         ("edgeness", c_float),
@@ -30,38 +30,38 @@ class SiftPoint(Structure):
         ("score", c_float),
         ("ambiguity", c_float),
         ("match", c_int),
-        ("match_xpos", c_float),
-        ("match_ypos", c_float),
+        ("match_x", c_float),
+        ("match_y", c_float),
         ("match_error", c_float),
         ("subsampling", c_float),
-        ("empty", c_float * 3),
-        ("data", c_float * 128),
+        ("reserved", c_float * 3),
+        ("descriptor", c_float * 128),
     ]
 
 
-class SiftData(Structure):
-    """Mirror of the C ``SiftData`` struct."""
+class cusift_keypoints(Structure):
+    """Mirror of the C ``cusift_keypoints`` struct."""
 
     _fields_ = [
-        ("numPts", c_int),
-        ("maxPts", c_int),
-        ("h_data", POINTER(SiftPoint)),
-        ("d_data", POINTER(SiftPoint)),
+        ("count", c_int),
+        ("capacity", c_int),
+        ("host", POINTER(cusift_keypoint)),
+        ("device", POINTER(cusift_keypoint)),
     ]
 
 
-class Image_t(Structure):
-    """Mirror of the C ``Image_t`` struct."""
+class cusift_image(Structure):
+    """Mirror of the C ``cusift_image`` struct."""
 
     _fields_ = [
-        ("host_img_", POINTER(c_float)),
-        ("width_", c_int),
-        ("height_", c_int),
+        ("pixels", POINTER(c_float)),
+        ("width", c_int),
+        ("height", c_int),
     ]
 
 
-class WarpGeometry_t(Structure):
-    """Mirror of the C ``WarpGeometry_t`` struct."""
+class cusift_canvas(Structure):
+    """Mirror of the C ``cusift_canvas`` struct."""
 
     _fields_ = [
         ("origin_u", c_int),
@@ -73,8 +73,8 @@ class WarpGeometry_t(Structure):
     ]
 
 
-class CusiftErrorRecord_t(Structure):
-    """Mirror of the C ``CusiftErrorRecord_t`` struct."""
+class cusift_error_record(Structure):
+    """Mirror of the C ``cusift_error_record`` struct."""
 
     _fields_ = [
         ("severity", c_int),
@@ -89,39 +89,41 @@ class CusiftErrorRecord_t(Structure):
     ]
 
 
-# void (*)(const CusiftErrorRecord_t *record, void *user_data)
-CusiftErrorCallback_t = CFUNCTYPE(None, POINTER(CusiftErrorRecord_t), c_void_p)
+# void (*)(const cusift_error_record *record, void *user_data)
+cusift_error_callback = CFUNCTYPE(None, POINTER(cusift_error_record), c_void_p)
 
 
-class ExtractSiftOptions_t(Structure):
-    """Mirror of the C ``ExtractSiftOptions_t`` struct."""
+class cusift_extract_options(Structure):
+    """Mirror of the C ``cusift_extract_options`` struct."""
 
     _fields_ = [
-        ("thresh_", c_float),
-        ("lowest_scale_", c_float),
-        ("highest_scale_", c_float),
-        ("edge_thresh_", c_float),
-        ("init_blur_", c_float),
-        ("max_keypoints_", c_int),
-        ("num_octaves_", c_int),
-        ("scale_suppression_radius_", c_float),
+        ("contrast_threshold", c_float),
+        ("lowest_scale", c_float),
+        ("highest_scale", c_float),
+        ("edge_threshold", c_float),
+        ("initial_blur", c_float),
+        ("max_keypoints", c_int),
+        ("num_octaves", c_int),
+        ("scale_suppression_radius", c_float),
     ]
 
 
-class FindHomographyOptions_t(Structure):
-    """Mirror of the C ``FindHomographyOptions_t`` struct."""
+class cusift_homography_options(Structure):
+    """Mirror of the C ``cusift_homography_options`` struct."""
 
     _fields_ = [
-        ("num_loops_", c_int),
-        ("min_score_", c_float),
-        ("max_ambiguity_", c_float),
-        ("thresh_", c_float),
-        ("improve_num_loops_", c_int),
-        ("improve_min_score_", c_float),
-        ("improve_max_ambiguity_", c_float),
-        ("improve_thresh_", c_float),
-        ("seed_", c_uint),
-        ("model_type_", c_int),
+        ("ransac_iterations", c_int),
+        ("min_score", c_float),
+        ("max_ambiguity", c_float),
+        ("inlier_threshold", c_float),
+        ("refine_iterations", c_int),
+        ("refine_min_score", c_float),
+        ("refine_max_ambiguity", c_float),
+        ("refine_inlier_threshold", c_float),
+        ("seed", c_uint),
+        ("model", c_int),
+        ("attempts", c_int),
+        ("goal", c_int),
     ]
 
 
@@ -178,155 +180,122 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
 
     # -- Bind every exported function -------------------------------------
 
-    # Error helpers
-    lib.CusiftGetLastErrorString.restype = None
-    lib.CusiftGetLastErrorString.argtypes = [
-        POINTER(c_int),
-        ctypes.c_char_p,
-        ctypes.c_size_t,
-        ctypes.c_char_p,
-        ctypes.c_size_t,
-    ]
+    # Version and errors
+    lib.cusift_version.restype = None
+    lib.cusift_version.argtypes = [POINTER(c_int), POINTER(c_int), POINTER(c_int)]
+    lib.cusift_last_error.restype = c_int
+    lib.cusift_last_error.argtypes = [POINTER(cusift_error_record)]
 
-    lib.CusiftHadError.restype = c_int
-    lib.CusiftHadError.argtypes = []
-
-    lib.CusiftGetLastCudaError.restype = c_int
-    lib.CusiftGetLastCudaError.argtypes = []
+    # Option defaults
+    lib.cusift_default_extract_options.restype = None
+    lib.cusift_default_extract_options.argtypes = [POINTER(cusift_extract_options)]
+    lib.cusift_default_homography_options.restype = None
+    lib.cusift_default_homography_options.argtypes = [POINTER(cusift_homography_options)]
 
     # Initialisation
-    lib.InitializeCudaSift.restype = None
-    lib.InitializeCudaSift.argtypes = []
+    lib.cusift_init.restype = None
+    lib.cusift_init.argtypes = []
 
     # Feature extraction
-    lib.ExtractSiftFromImage.restype = None
-    lib.ExtractSiftFromImage.argtypes = [
-        POINTER(Image_t),
-        POINTER(SiftData),
-        POINTER(ExtractSiftOptions_t),
+    lib.cusift_extract.restype = None
+    lib.cusift_extract.argtypes = [
+        POINTER(cusift_image),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_extract_options),
     ]
 
     # Matching
-    lib.MatchSiftData.restype = None
-    lib.MatchSiftData.argtypes = [POINTER(SiftData), POINTER(SiftData)]
+    lib.cusift_match.restype = None
+    lib.cusift_match.argtypes = [POINTER(cusift_keypoints), POINTER(cusift_keypoints)]
 
     # Homography
-    lib.FindHomography.restype = None
-    lib.FindHomography.argtypes = [
-        POINTER(SiftData),
+    lib.cusift_estimate_homography.restype = None
+    lib.cusift_estimate_homography.argtypes = [
+        POINTER(cusift_keypoints),
         POINTER(c_float),
         POINTER(c_int),
-        POINTER(FindHomographyOptions_t),
+        POINTER(cusift_homography_options),
     ]
 
     # Image warping
-    lib.WarpImages.restype = None
-    lib.WarpImages.argtypes = [
-        POINTER(Image_t),  # image1
-        POINTER(Image_t),  # image2
+    lib.cusift_warp.restype = None
+    lib.cusift_warp.argtypes = [
+        POINTER(cusift_image),  # image1
+        POINTER(cusift_image),  # image2
         POINTER(c_float),  # homography
-        POINTER(Image_t),  # warped_image1  (out)
-        POINTER(Image_t),  # warped_image2  (out)
-        c_bool,            # useGPU
+        POINTER(cusift_image),  # warped_image1  (out)
+        POINTER(cusift_image),  # warped_image2  (out)
+        c_bool,            # use_gpu
     ]
 
     # Canvas geometry (no warp)
-    lib.ComputeWarpGeometry.restype = None
-    lib.ComputeWarpGeometry.argtypes = [
+    lib.cusift_compute_canvas.restype = None
+    lib.cusift_compute_canvas.argtypes = [
         POINTER(c_float),          # homography
         c_int, c_int,              # image_width1, image_height1
         c_int, c_int,              # image_width2, image_height2
-        POINTER(WarpGeometry_t),   # geometry (out)
+        POINTER(cusift_canvas),   # geometry (out)
     ]
 
     # Process-local device reset after a sticky CUDA error
-    lib.CusiftResetDevice.restype = None
-    lib.CusiftResetDevice.argtypes = []
+    lib.cusift_device_reset.restype = None
+    lib.cusift_device_reset.argtypes = []
 
     # Error log file and callback
-    lib.CusiftSetErrorLog.restype = None
-    lib.CusiftSetErrorLog.argtypes = [c_char_p, c_size_t]
-    lib.CusiftSetErrorCallback.restype = None
-    lib.CusiftSetErrorCallback.argtypes = [CusiftErrorCallback_t, c_void_p]
-    lib.CusiftErrorLogDroppedCount.restype = c_ulonglong
-    lib.CusiftErrorLogDroppedCount.argtypes = []
+    lib.cusift_set_error_log.restype = None
+    lib.cusift_set_error_log.argtypes = [c_char_p, c_size_t]
+    lib.cusift_set_error_callback.restype = None
+    lib.cusift_set_error_callback.argtypes = [cusift_error_callback, c_void_p]
+    lib.cusift_error_log_dropped.restype = c_ulonglong
+    lib.cusift_error_log_dropped.argtypes = []
 
     # Cleanup
-    lib.DeleteSiftData.restype = None
-    lib.DeleteSiftData.argtypes = [POINTER(SiftData)]
+    lib.cusift_keypoints_free.restype = None
+    lib.cusift_keypoints_free.argtypes = [POINTER(cusift_keypoints)]
 
-    lib.FreeImage.restype = None
-    lib.FreeImage.argtypes = [POINTER(Image_t)]
+    lib.cusift_image_free.restype = None
+    lib.cusift_image_free.argtypes = [POINTER(cusift_image)]
 
     # Save / serialise
-    lib.SaveSiftData.restype = None
-    lib.SaveSiftData.argtypes = [ctypes.c_char_p, POINTER(SiftData)]
+    lib.cusift_keypoints_save_json.restype = None
+    lib.cusift_keypoints_save_json.argtypes = [ctypes.c_char_p, POINTER(cusift_keypoints)]
 
     # -- Convenience combo functions --------------------------------------
 
-    lib.ExtractAndMatchSift.restype = None
-    lib.ExtractAndMatchSift.argtypes = [
-        POINTER(Image_t),
-        POINTER(Image_t),
-        POINTER(SiftData),
-        POINTER(SiftData),
-        POINTER(ExtractSiftOptions_t),
+    lib.cusift_extract_and_match.restype = None
+    lib.cusift_extract_and_match.argtypes = [
+        POINTER(cusift_image),
+        POINTER(cusift_image),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_extract_options),
     ]
 
-    lib.ExtractAndMatchAndFindHomography.restype = None
-    lib.ExtractAndMatchAndFindHomography.argtypes = [
-        POINTER(Image_t),
-        POINTER(Image_t),
-        POINTER(SiftData),
-        POINTER(SiftData),
-        POINTER(c_float),
-        POINTER(c_int),
-        POINTER(ExtractSiftOptions_t),
-        POINTER(FindHomographyOptions_t),
+    lib.cusift_align.restype = None
+    lib.cusift_align.argtypes = [
+        POINTER(cusift_image),
+        POINTER(cusift_image),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_extract_options),
+        POINTER(cusift_homography_options),
+        POINTER(c_float),   # homography (out)
+        POINTER(c_int),     # inliers (out)
     ]
 
-    lib.ExtractAndMatchAndFindHomography_Multi.restype = None
-    lib.ExtractAndMatchAndFindHomography_Multi.argtypes = [
-        POINTER(Image_t),
-        POINTER(Image_t),
-        POINTER(SiftData),
-        POINTER(SiftData),
-        POINTER(c_float),
-        POINTER(c_int),
-        POINTER(ExtractSiftOptions_t),
-        POINTER(FindHomographyOptions_t),
-        c_int,
-        c_int,
+    lib.cusift_align_and_warp.restype = None
+    lib.cusift_align_and_warp.argtypes = [
+        POINTER(cusift_image),
+        POINTER(cusift_image),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_keypoints),
+        POINTER(cusift_extract_options),
+        POINTER(cusift_homography_options),
+        POINTER(c_float),        # homography (out)
+        POINTER(c_int),          # inliers (out)
+        POINTER(cusift_image),   # warped1 (out)
+        POINTER(cusift_image),   # warped2 (out)
     ]
 
-    lib.ExtractAndMatchAndFindHomographyAndWarp.restype = None
-    lib.ExtractAndMatchAndFindHomographyAndWarp.argtypes = [
-        POINTER(Image_t),
-        POINTER(Image_t),
-        POINTER(SiftData),
-        POINTER(SiftData),
-        POINTER(c_float),
-        POINTER(c_int),
-        POINTER(ExtractSiftOptions_t),
-        POINTER(FindHomographyOptions_t),
-        POINTER(Image_t),
-        POINTER(Image_t),
-    ]
-
-    lib.ExtractAndMatchAndFindHomography_Multi_AndWarp.restype = None
-    lib.ExtractAndMatchAndFindHomography_Multi_AndWarp.argtypes = [
-        POINTER(Image_t),
-        POINTER(Image_t),
-        POINTER(SiftData),
-        POINTER(SiftData),
-        POINTER(c_float),
-        POINTER(c_int),
-        POINTER(ExtractSiftOptions_t),
-        POINTER(FindHomographyOptions_t),
-        POINTER(Image_t),   # warped_image1 (out)
-        POINTER(Image_t),   # warped_image2 (out)
-        c_int,               # num_homography_attempts
-        c_int,               # homography_goal
-    ]
 
     return lib
