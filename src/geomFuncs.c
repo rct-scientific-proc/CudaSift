@@ -88,11 +88,11 @@
           ok      = cusift_cpu_supports_avx2_fma();
           checked = 1;
           if (!ok) {
-              fprintf(stderr,
-                  "cusift: this build of geomFuncs requires AVX2 + FMA, "
-                  "but the host CPU does not advertise them. "
-                  "Rebuild with -DCUSIFT_ENABLE_AVX2=OFF for a portable "
-                  "scalar fallback.\n");
+              cusift_report_warning("ImproveHomography",
+                  "this build of geomFuncs requires AVX2 + FMA, but the host "
+                  "CPU does not advertise them; the homography is returned "
+                  "unrefined. Rebuild with -DCUSIFT_ENABLE_AVX2=OFF for a "
+                  "portable scalar fallback.");
           }
       }
       return ok;

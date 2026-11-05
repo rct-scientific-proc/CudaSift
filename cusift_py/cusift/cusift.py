@@ -11,11 +11,13 @@ import weakref
 from ctypes import POINTER, byref, c_bool, c_float, c_int
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import numpy as np
 
 from cusift._bindings import (
+    CusiftErrorCallback_t,
+    CusiftErrorRecord_t,
     ExtractSiftOptions_t,
     FindHomographyOptions_t,
     Image_t,
@@ -152,6 +154,33 @@ class MatchResult:
 
     ambiguity: float
     """Match ambiguity of the query keypoint."""
+
+
+@dataclass
+class ErrorRecord:
+    """One error or warning reported by the library (see ``CusiftErrorRecord_t``).
+
+    ``severity`` is 0 for an error (the call failed) and 1 for a warning (the
+    call completed in a degraded way).
+    """
+
+    severity: int
+    function: str
+    file: str
+    line: int
+    cuda_error: int
+    cuda_error_name: str
+    message: str
+    thread_id: int
+    timestamp_ms: int
+
+    @classmethod
+    def _from_ctypes(cls, r: CusiftErrorRecord_t) -> "ErrorRecord":
+        def s(b: Optional[bytes]) -> str:
+            return b.decode("utf-8", errors="replace") if b else ""
+        return cls(severity=int(r.severity), function=s(r.function), file=s(r.file), line=int(r.line),
+                   cuda_error=int(r.cuda_error), cuda_error_name=s(r.cuda_error_name), message=s(r.message),
+                   thread_id=int(r.thread_id), timestamp_ms=int(r.timestamp_ms))
 
 
 @dataclass
@@ -443,7 +472,65 @@ class CuSift:
 
     def __init__(self, dll_path: Optional[Union[str, Path]] = None):
         self._lib = load_library(dll_path)
+        self._error_cb = None  # keeps the ctypes callback object alive while registered
         self._lib.InitializeCudaSift()
+        _check_error(self._lib)
+
+    # -- Error sinks ------------------------------------------------------
+
+    def set_error_log(self, path: Optional[Union[str, Path]] = "", max_bytes: int = 0) -> None:
+        """Append every library error and warning to a file.
+
+        Calls the C ``CusiftSetErrorLog`` function.  ``path=None`` turns the
+        file off, ``""`` (the default) uses ``<temp dir>/cusift-errors.log``,
+        anything else is the file to append to.  ``max_bytes`` is the rotation
+        cap (0 = 1 MiB): when exceeded the file is renamed to ``<path>.1`` and
+        restarted.  Logging never raises and never affects the call being logged.
+        """
+        if path is None:
+            self._lib.CusiftSetErrorLog(None, 0)
+        else:
+            self._lib.CusiftSetErrorLog(str(path).encode("utf-8"), int(max_bytes))
+
+    def set_error_callback(self, callback: Optional[Callable[[ErrorRecord], None]]) -> None:
+        """Deliver every library error and warning to *callback* as well.
+
+        Calls the C ``CusiftSetErrorCallback`` function.  The callback receives
+        an :class:`ErrorRecord` and runs on the thread where the error occurred.
+        An exception raised inside it is printed by ctypes and otherwise
+        ignored.  Pass ``None`` to remove the callback.  Process-wide: the last
+        registration wins, whichever :class:`CuSift` instance made it.
+        """
+        if callback is None:
+            self._lib.CusiftSetErrorCallback(CusiftErrorCallback_t(0), None)
+            self._error_cb = None
+            return
+
+        def trampoline(rec_ptr, _user):
+            callback(ErrorRecord._from_ctypes(rec_ptr.contents))
+
+        cb = CusiftErrorCallback_t(trampoline)
+        self._lib.CusiftSetErrorCallback(cb, None)
+        self._error_cb = cb
+
+    def error_log_dropped_count(self) -> int:
+        """Number of log records that could not be written to the error log."""
+        return int(self._lib.CusiftErrorLogDroppedCount())
+
+    def reset_device(self) -> None:
+        """Recover from a sticky CUDA error by resetting this process's context.
+
+        Calls the C ``CusiftResetDevice`` function.  The reset is process-local
+        (other processes sharing the GPU are unaffected), but it destroys every
+        device allocation of this process: free every :class:`KeypointList`
+        first and do not reuse any GPU-resident result afterwards.
+
+        Raises
+        ------
+        CuSiftError
+            If the device is still unusable after the reset.
+        """
+        self._lib.CusiftResetDevice()
         _check_error(self._lib)
 
     # -- Feature extraction -----------------------------------------------

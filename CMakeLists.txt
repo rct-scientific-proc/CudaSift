@@ -1,5 +1,24 @@
 cmake_minimum_required(VERSION 3.23)
 
+# ── CUDA architecture ───────────────────────────────────
+# This must run BEFORE project(): enabling the CUDA language inside project()
+# defines CMAKE_CUDA_ARCHITECTURES from nvcc's own default (a single
+# architecture), after which a "NOT DEFINED" check never fires and the project
+# default is silently ignored.  A -DCMAKE_CUDA_ARCHITECTURES=... on the command
+# line is already defined here and wins.
+option(CUSIFT_ALL_CUDA_ARCHS "Build for all supported CUDA architectures" OFF)
+if(CUSIFT_ALL_CUDA_ARCHS)
+  set(CMAKE_CUDA_ARCHITECTURES all)
+elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  # One cubin per major architecture the toolkit supports, plus PTX for the
+  # newest.  A cubin built for X.0 runs on every X.y, so this covers every GPU
+  # the toolkit can drive, Jetson Orin (8.7) included, at a fraction of the
+  # build time of "all".  Pass -DCMAKE_CUDA_ARCHITECTURES=87 (or 72 for
+  # Xavier under CUDA 11/12) for a build tuned to one board, or
+  # -DCUSIFT_ALL_CUDA_ARCHS=ON for a cubin per minor architecture.
+  set(CMAKE_CUDA_ARCHITECTURES all-major)
+endif()
+
 project(cudaSift
   VERSION 2.4.0
   LANGUAGES C CXX CUDA
@@ -16,8 +35,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # ── Options ──────────────────────────────────────────────
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
 option(CUSIFT_USE_FAST_MATH  "Compile CUDA code with --use_fast_math"             OFF)
-option(CUSIFT_ALL_CUDA_ARCHS "Build for all supported CUDA architectures"         OFF)
 option(CUSIFT_ENABLE_AVX2    "Compile geomFuncs.c with AVX2 + FMA (x86/x64 only)" ON)
+# CUSIFT_ALL_CUDA_ARCHS is declared above project(), where it has to be.
 
 # Detect whether the host architecture even supports AVX2 / FMA. On non-x86
 # targets (e.g. arm64) the AVX2 path is unconditionally skipped, regardless
@@ -31,13 +50,7 @@ endif()
 # ── OpenMP ───────────────────────────────────────────────
 find_package(OpenMP COMPONENTS C CXX)
 
-# ── CUDA architecture ───────────────────────────────────
-# Override with -DCMAKE_CUDA_ARCHITECTURES="75;86" etc.
-if(CUSIFT_ALL_CUDA_ARCHS)
-  set(CMAKE_CUDA_ARCHITECTURES all)
-elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
-endif()
+message(STATUS "cusift: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
 
 # ── Source files ──────────────────────────────────────────
 set(CUDA_SOURCES
@@ -90,6 +103,9 @@ if(CUSIFT_BUILD_SHARED)
 else()
   add_library(cusift STATIC ${C_SOURCES} $<TARGET_OBJECTS:cusift_cuda>)
   target_compile_definitions(cusift PUBLIC CUSIFT_STATIC)
+  # The CUDA objects include cusift.h too; without the define they see the
+  # API declared dllimport while defining it (nvcc warning #1390-D on MSVC).
+  target_compile_definitions(cusift_cuda PRIVATE CUSIFT_STATIC)
 endif()
 
 target_include_directories(cusift

@@ -22,6 +22,10 @@ void ExtractSift(SiftData *siftData, CudaImage *img, int numOctaves, float initB
 // allocation fails; on failure the struct is left empty (maxPts == 0).
 void InitSiftData(SiftData *data, int num, bool host, bool dev);
 void FreeSiftData(SiftData *data);
+// Report a warning (severity 1) through the library's error sinks (log file
+// and callback).  Never throws and allocates nothing the caller must manage,
+// so it is safe from C and during stack unwinding.
+void cusift_report_warning(const char *function, const char *message);
 void SuppressEmbeddedPoints(SiftData *data, float radiusScale);
 double MatchSiftData_private(SiftData *data1, SiftData *data2);
 double FindHomography_private(SiftData *data, float *homography, int *numMatches, int numLoops, float minScore, float maxAmbiguity, float thresh, unsigned int seed);

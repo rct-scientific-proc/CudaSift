@@ -14,6 +14,7 @@ Example
 from cusift.cusift import (
     CuSift,
     CuSiftError,
+    ErrorRecord,
     ExtractOptions,
     HOMOGRAPHY_GOAL_MAX_INLIERS,
     HOMOGRAPHY_GOAL_MIN_EYE_DIFF,
@@ -29,6 +30,7 @@ from cusift.cusift import (
 __all__ = [
     "CuSift",
     "CuSiftError",
+    "ErrorRecord",
     "ExtractOptions",
     "HOMOGRAPHY_GOAL_MAX_INLIERS",
     "HOMOGRAPHY_GOAL_MIN_EYE_DIFF",

@@ -18,6 +18,14 @@
 #include <string>
 #include <random>
 #include <omp.h>
+#include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <mutex>
+#include <thread>
 
 #define ERROR(msg) cusift_throw_error(__FILE__, __LINE__, msg)
 
@@ -45,6 +53,14 @@ static const int kMaxKeypointsLimit = (int)(INT_MAX / sizeof(SiftPoint));
 // TestHomographies / TestSimilarities put one 16-hypothesis block per grid.y.
 static const int kMaxRansacLoops = 65535 * 16;
 
+// Image dimension limits.  The minimum keeps every level of the three octaves
+// the library always builds non-empty (8 -> 4 -> 2); below it the pyramid
+// kernels failed with an opaque "invalid argument".  The maximum is set by the
+// 16-bit candidate-position storage in FindPointsMultiNew (width) and by the
+// one-block-per-row Laplace grid and the 2-D texture limit (height).
+static const int kMinImageDim = 8;
+static const int kMaxImageDim = 65535;
+
 static void ValidateImage(const Image_t *img, const char *what)
 {
     RequireNonNull(img, what);
@@ -52,9 +68,30 @@ static void ValidateImage(const Image_t *img, const char *what)
         throw CusiftError(__FILE__, __LINE__, std::string(what) + ": host_img_ is NULL");
     if (img->width_ <= 0 || img->height_ <= 0)
         throw CusiftError(__FILE__, __LINE__, std::string(what) + ": width and height must be positive");
+    if (img->width_ < kMinImageDim || img->height_ < kMinImageDim)
+        throw CusiftError(__FILE__, __LINE__, std::string(what) + ": image must be at least " + std::to_string(kMinImageDim) + " pixels in each dimension");
+    if (img->width_ > kMaxImageDim || img->height_ > kMaxImageDim)
+        throw CusiftError(__FILE__, __LINE__, std::string(what) + ": image dimensions must not exceed " + std::to_string(kMaxImageDim) + " pixels");
     // Row offsets inside the kernels are 32-bit; one pitched plane must fit.
     if ((size_t)p_iAlignUp(img->width_, 128) * (size_t)img->height_ > (size_t)INT_MAX)
         throw CusiftError(__FILE__, __LINE__, std::string(what) + ": image too large (pitch * height must fit in a 32-bit int)");
+    // A cudaMalloc pointer is not CPU-readable: the CPU warp path would fault on
+    // it and the host-to-device copies would fail.  Classify it and reject it
+    // before anything dereferences it.  Pinned and managed memory are host
+    // readable and pass.  Older runtimes report plain pageable memory through
+    // the error return instead of cudaMemoryTypeUnregistered; that is host
+    // memory, so clear the flag and accept it.
+    cudaPointerAttributes attr;
+    cudaError_t perr = cudaPointerGetAttributes(&attr, img->host_img_);
+    if (perr == cudaSuccess)
+    {
+        if (attr.type == cudaMemoryTypeDevice)
+            throw CusiftError(__FILE__, __LINE__, std::string(what) + ": host_img_ points to device memory; pass host, pinned or managed memory");
+    }
+    else
+    {
+        (void)cudaGetLastError();
+    }
 }
 
 static void ValidateExtractOptions(const ExtractSiftOptions_t *o)
@@ -133,9 +170,178 @@ struct CusiftErrorState
 
 static thread_local CusiftErrorState s_error;
 
-// Wrap an API body: clear error state, run fn(), catch and store any exception.
+// ── Error sinks: log file and callback ──────────────────
+// Every failure of a public function passes through cusift_api_guard, which
+// hands it to cusift_report().  cusift_report() forwards the record to the
+// optional callback and the optional log file.  Reporting never throws and
+// never changes the outcome of the call being reported.
+namespace
+{
+struct ErrorSinkConfig
+{
+    std::mutex              mutex;
+    bool                    api_configured = false; // CusiftSetErrorLog() was called: the environment is ignored
+    bool                    env_checked    = false;
+    std::string             log_path;               // empty = file logging off
+    size_t                  max_bytes      = 0;
+    CusiftErrorCallback_t   callback       = nullptr;
+    void                   *user_data      = nullptr;
+    unsigned long long      dropped        = 0;
+};
+
+// Function-local static: constructed on first use, so it is valid however
+// early a caller (or a static initialiser in the host program) reports.
+ErrorSinkConfig &sinks()
+{
+    static ErrorSinkConfig c;
+    return c;
+}
+
+const size_t kDefaultLogMaxBytes = (size_t)1 << 20;
+
+std::string default_log_path()
+{
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+    if (ec)
+        dir = ".";
+    return (dir / "cusift-errors.log").string();
+}
+
+// Mutex held.
+void apply_log_setting(ErrorSinkConfig &c, const char *path, size_t max_bytes)
+{
+    if (!path)
+    {
+        c.log_path.clear();
+        c.max_bytes = 0;
+        return;
+    }
+    c.log_path  = (*path == '\0') ? default_log_path() : std::string(path);
+    c.max_bytes = max_bytes ? max_bytes : kDefaultLogMaxBytes;
+}
+
+// Mutex held.  CUSIFT_ERROR_LOG is read once, and only if the API was never used.
+void read_env_once(ErrorSinkConfig &c)
+{
+    if (c.env_checked)
+        return;
+    c.env_checked = true;
+    if (c.api_configured)
+        return;
+    const char *p = std::getenv("CUSIFT_ERROR_LOG");
+    if (!p || !*p)
+        return;
+    size_t max_bytes = 0;
+    if (const char *m = std::getenv("CUSIFT_ERROR_LOG_MAX_BYTES"))
+        max_bytes = (size_t)std::strtoull(m, nullptr, 10);
+    apply_log_setting(c, (std::strcmp(p, "default") == 0) ? "" : p, max_bytes);
+}
+
+std::string format_record(const CusiftErrorRecord_t &r)
+{
+    std::time_t secs = (std::time_t)(r.timestamp_ms / 1000);
+    int ms = (int)(r.timestamp_ms % 1000);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &secs);
+#else
+    gmtime_r(&secs, &tm);
+#endif
+    char stamp[40];
+    std::snprintf(stamp, sizeof(stamp), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+    std::ostringstream line;
+    line << stamp << ' ' << (r.severity == 0 ? "error  " : "warning")
+         << " tid=0x" << std::hex << r.thread_id << std::dec
+         << ' ' << r.function;
+    if (r.file && *r.file)
+        line << ' ' << r.file << ':' << r.line;
+    if (r.cuda_error != 0)
+        line << " cuda=" << r.cuda_error << '(' << r.cuda_error_name << ')';
+    line << ' ' << r.message << '\n';
+    return line.str();
+}
+
+// Mutex held.  Rotate when the next line would push the file past the cap.
+void write_line(ErrorSinkConfig &c, const std::string &line)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path p(c.log_path);
+    auto size = fs::file_size(p, ec);
+    if (!ec && size + line.size() > c.max_bytes)
+    {
+        fs::path old = p;
+        old += ".1";
+        fs::remove(old, ec);
+        ec.clear();
+        fs::rename(p, old, ec);
+        if (ec)
+            fs::remove(p, ec); // could not rotate: start over in place
+    }
+    std::ofstream f(p, std::ios::app);
+    if (!f)
+    {
+        c.dropped++;
+        return;
+    }
+    f << line;
+    f.close();
+    if (!f)
+        c.dropped++;
+}
+} // namespace
+
+// Build a record and hand it to the sinks.  noexcept by construction: it is
+// called from error paths, from destructors during unwinding, and from C.
+static void cusift_report(int severity, const char *function, const char *file, int line,
+                          cudaError_t cuda_error, const char *message) noexcept
+{
+    try
+    {
+        CusiftErrorRecord_t rec{};
+        rec.severity        = severity;
+        rec.function        = function ? function : "";
+        rec.file            = file ? file : "";
+        rec.line            = line;
+        rec.cuda_error      = (int)cuda_error;
+        rec.cuda_error_name = (cuda_error != cudaSuccess) ? cudaGetErrorName(cuda_error) : "";
+        rec.message         = message ? message : "";
+        rec.thread_id       = (unsigned long long)std::hash<std::thread::id>{}(std::this_thread::get_id());
+        rec.timestamp_ms    = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch()).count();
+
+        CusiftErrorCallback_t cb = nullptr;
+        void *ud = nullptr;
+        {
+            ErrorSinkConfig &c = sinks();
+            std::lock_guard<std::mutex> lock(c.mutex);
+            read_env_once(c);
+            if (!c.log_path.empty())
+                write_line(c, format_record(rec));
+            cb = c.callback;
+            ud = c.user_data;
+        }
+        if (cb)
+            cb(&rec, ud); // outside the lock: the callback may reconfigure the sinks
+    }
+    catch (...)
+    {
+        // Reporting must never throw.
+    }
+}
+
+// C-callable warning entry used by geomFuncs.c and the cleanup paths.
+void cusift_report_warning(const char *function, const char *message)
+{
+    cusift_report(1, function, "", 0, cudaSuccess, message);
+}
+
+// Wrap an API body: clear error state, run fn(), catch and store any
+// exception, and report it to the sinks.  `api` is the public function's name.
 template <typename F>
-static void cusift_api_guard(F &&fn)
+static void cusift_api_guard(const char *api, F &&fn)
 {
     s_error.clear();
     try
@@ -149,6 +355,7 @@ static void cusift_api_guard(F &&fn)
         s_error.line       = e.line;
         s_error.message    = e.what();
         s_error.cuda_error = e.cuda_error;
+        cusift_report(0, api, e.file.c_str(), e.line, e.cuda_error, e.what());
     }
     catch (const std::exception &e)
     {
@@ -157,6 +364,7 @@ static void cusift_api_guard(F &&fn)
         s_error.line      = 0;
         s_error.file.clear();
         s_error.message   = e.what();
+        cusift_report(0, api, "", 0, cudaSuccess, e.what());
     }
     catch (...)
     {
@@ -164,6 +372,7 @@ static void cusift_api_guard(F &&fn)
         s_error.line      = 0;
         s_error.file.clear();
         s_error.message   = "Unknown exception";
+        cusift_report(0, api, "", 0, cudaSuccess, "Unknown exception");
     }
 }
 
@@ -203,7 +412,7 @@ int CusiftGetLastCudaError()
 
 void InitializeCudaSift()
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         int nDevices;
         safeCall(cudaGetDeviceCount(&nDevices));
@@ -214,9 +423,68 @@ void InitializeCudaSift()
     });
 }
 
+void CusiftResetDevice(void)
+{
+    cusift_api_guard(__func__, [&]()
+    {
+        // cudaDeviceReset tears down this process's context on the current
+        // device only; other processes are unaffected.  Its own return value is
+        // not a useful health signal (it may echo the sticky error it is
+        // clearing), so drop it and let a fresh context creation decide.
+        (void)cudaDeviceReset();
+        (void)cudaGetLastError();
+        safeCall(cudaFree(0)); // creates the new primary context; fails if the device is still unusable
+    });
+}
+
+// The sink configuration functions never fail and deliberately leave the
+// thread-local error state alone, like the cleanup functions.
+void CusiftSetErrorLog(const char *path, size_t max_bytes)
+{
+    try
+    {
+        ErrorSinkConfig &c = sinks();
+        std::lock_guard<std::mutex> lock(c.mutex);
+        c.api_configured = true;
+        c.env_checked    = true;
+        apply_log_setting(c, path, max_bytes);
+    }
+    catch (...)
+    {
+    }
+}
+
+void CusiftSetErrorCallback(CusiftErrorCallback_t callback, void *user_data)
+{
+    try
+    {
+        ErrorSinkConfig &c = sinks();
+        std::lock_guard<std::mutex> lock(c.mutex);
+        c.callback  = callback;
+        c.user_data = user_data;
+    }
+    catch (...)
+    {
+    }
+}
+
+unsigned long long CusiftErrorLogDroppedCount(void)
+{
+    try
+    {
+        ErrorSinkConfig &c = sinks();
+        std::lock_guard<std::mutex> lock(c.mutex);
+        return c.dropped;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
 void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const ExtractSiftOptions_t *options)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image, "image");
         ValidateExtractOptions(options);
@@ -265,7 +533,7 @@ void ExtractSiftFromImage(const Image_t *image, SiftData *sift_data, const Extra
 
 void MatchSiftData(SiftData *data1, SiftData *data2)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         RequireNonNull(data1, "data1");
         RequireNonNull(data2, "data2");
@@ -275,7 +543,7 @@ void MatchSiftData(SiftData *data1, SiftData *data2)
 
 void FindHomography(SiftData *data, float *homography, int *num_matches, const FindHomographyOptions_t *options)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         RequireNonNull(data, "data");
         RequireNonNull(homography, "homography");
@@ -333,7 +601,14 @@ void FreeImage_GPU(ImageStrided_t *image)
 {
     if (image && image->strided_img_)
     {
-        cudaFree(image->strided_img_);
+        cudaError_t e = cudaFree(image->strided_img_);
+        if (e != cudaSuccess)
+        {
+            (void)cudaGetLastError();
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "cudaFree of the warped image failed: %s", cudaGetErrorString(e));
+            cusift_report(1, "FreeImage_GPU", "", 0, e, buf);
+        }
         image->strided_img_ = nullptr;
         image->width_ = 0;
         image->height_ = 0;
@@ -343,7 +618,7 @@ void FreeImage_GPU(ImageStrided_t *image)
 
 void SaveSiftData(const char *filename, const SiftData *sift_data)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         RequireNonNull(filename, "filename");
         if (!sift_data || !sift_data->h_data || sift_data->numPts <= 0)
@@ -392,7 +667,7 @@ void SaveSiftData(const char *filename, const SiftData *sift_data)
 
 void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, const ExtractSiftOptions_t *extract_options)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -450,7 +725,7 @@ void ExtractAndMatchSift(const Image_t *image1, const Image_t *image2, SiftData 
 
 void ExtractAndMatchAndFindHomography(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -542,7 +817,7 @@ static float EyeDiff2x2(const float *H)
 
 void ExtractAndMatchAndFindHomography_Multi(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, int num_homography_attempts, int homography_goal)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -880,7 +1155,7 @@ __global__ void WarpDualKernel(
 void WarpImages(const Image_t *image1, const Image_t *image2, const float *homography,
                 Image_t *warped_image1, Image_t *warped_image2, bool useGPU)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -949,6 +1224,7 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
                 H00, H01, H02,
                 H10, H11, H12,
                 H20, H21, H22);
+        checkMsg("WarpDualKernel() execution failed\n");
 
             safeCall(cudaDeviceSynchronize());
 
@@ -996,7 +1272,7 @@ void WarpImages(const Image_t *image1, const Image_t *image2, const float *homog
 void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *homography,
                     ImageStrided_t *warped_image1, ImageStrided_t *warped_image2)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -1050,6 +1326,7 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
+        checkMsg("WarpDualKernel() execution failed\n");
 
         safeCall(cudaDeviceSynchronize());
 
@@ -1070,7 +1347,7 @@ void WarpImages_GPU(const Image_t *image1, const Image_t *image2, const float *h
 
 void ComputeWarpGeometry(const float *homography, int image_width1, int image_height1, int image_width2, int image_height2, WarpGeometry_t *geometry)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         RequireNonNull(geometry, "geometry");
         std::memset(geometry, 0, sizeof(*geometry));
@@ -1083,7 +1360,7 @@ void ComputeWarpGeometry(const float *homography, int image_width1, int image_he
 
 void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -1202,6 +1479,7 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
+        checkMsg("WarpDualKernel() execution failed\n");
 
         safeCall(cudaDeviceSynchronize());
 
@@ -1229,7 +1507,7 @@ void ExtractAndMatchAndFindHomographyAndWarp(const Image_t *image1, const Image_
 
 void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, ImageStrided_t *warped_image1, ImageStrided_t *warped_image2)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -1344,6 +1622,7 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
+        checkMsg("WarpDualKernel() execution failed\n");
 
         safeCall(cudaDeviceSynchronize());
 
@@ -1362,7 +1641,7 @@ void ExtractAndMatchAndFindHomographyAndWarp_GPU(const Image_t *image1, const Im
 
 void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const Image_t *image2, SiftData *sift_data1, SiftData *sift_data2, float *homography, int *num_matches, const ExtractSiftOptions_t *extract_options, const FindHomographyOptions_t *homography_options, Image_t *warped_image1, Image_t *warped_image2, int num_homography_attempts, int homography_goal)
 {
-    cusift_api_guard([&]()
+    cusift_api_guard(__func__, [&]()
     {
         ValidateImage(image1, "image1");
         ValidateImage(image2, "image2");
@@ -1523,6 +1802,7 @@ void ExtractAndMatchAndFindHomography_Multi_AndWarp(const Image_t *image1, const
             H00, H01, H02,
             H10, H11, H12,
             H20, H21, H22);
+        checkMsg("WarpDualKernel() execution failed\n");
 
         safeCall(cudaDeviceSynchronize());
 

@@ -3,6 +3,8 @@
 
 #include "cusift.h"
 #include <iostream>
+#include <fstream>
+#include <string>
 #include <vector>
 #include <cmath>
 #include <limits>
@@ -1065,6 +1067,205 @@ static bool test_warp_geometry(const Image_t& im1, const Image_t& im2)
     return pass;
 }
 
+// -- Test: error log file and error callback ---------------
+
+struct ErrorTally
+{
+    int errors = 0;
+    int warnings = 0;
+    std::string last_function;
+    std::string last_message;
+};
+
+static void tally_callback(const CusiftErrorRecord_t* r, void* user)
+{
+    ErrorTally* t = static_cast<ErrorTally*>(user);
+    if (r->severity == 0) t->errors++; else t->warnings++;
+    t->last_function = r->function;
+    t->last_message = r->message;
+}
+
+static std::string read_file(const std::string& path)
+{
+    std::ifstream f(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+static bool test_error_log(const Image_t& im1)
+{
+    std::cout << "[TEST] Error log file and callback" << std::endl;
+    bool pass = true;
+    const std::string path = "cusift-test-errors.log";
+    const std::string rotated = path + ".1";
+    std::remove(path.c_str());
+    std::remove(rotated.c_str());
+
+    ErrorTally tally;
+    CusiftSetErrorCallback(tally_callback, &tally);
+    CusiftSetErrorLog(path.c_str(), 1500); // small cap so the loop below rotates the file
+
+    ExtractSiftOptions_t eo = default_extract_options();
+    float dummy[64] = {0.0f};
+    Image_t bad = { dummy, 4, 4 };
+    const int N = 25;
+    for (int i = 0; i < N; i++)
+    {
+        SiftData sd{};
+        ExtractSiftFromImage(&bad, &sd, &eo);
+        DeleteSiftData(&sd);
+    }
+
+    // 1. Every error reached the callback, with the public function and message.
+    if (tally.errors != N || tally.warnings != 0
+        || tally.last_function != "ExtractSiftFromImage"
+        || tally.last_message.find("at least 8 pixels") == std::string::npos)
+    {
+        std::cout << "  [FAIL] callback saw " << tally.errors << " errors / " << tally.warnings << " warnings, last: "
+                  << tally.last_function << ": " << tally.last_message << std::endl;
+        pass = false;
+    }
+
+    // 2. The file holds complete lines and was rotated at the cap.
+    const std::string content = read_file(path);
+    const bool has_line = content.find("ExtractSiftFromImage") != std::string::npos
+                       && content.find("at least 8 pixels") != std::string::npos
+                       && content.find(" error ") != std::string::npos
+                       && content.find("Z ") != std::string::npos;
+    const bool was_rotated = !read_file(rotated).empty();
+    std::cout << "  log: " << content.size() << " bytes, rotated file " << (was_rotated ? "present" : "absent") << std::endl;
+    std::cout << "  last line: " << content.substr(content.rfind('\n', content.size() - 2) + 1);
+    if (!has_line || !was_rotated || content.size() > 1500)
+    {
+        std::cout << "  [FAIL] log content or rotation wrong" << std::endl;
+        pass = false;
+    }
+
+    // 3. Nothing was dropped.
+    if (CusiftErrorLogDroppedCount() != 0)
+    {
+        std::cout << "  [FAIL] dropped " << CusiftErrorLogDroppedCount() << " records" << std::endl;
+        pass = false;
+    }
+
+    // 4. A successful call reports nothing.
+    {
+        SiftData sd{};
+        ExtractSiftFromImage(&im1, &sd, &eo);
+        DeleteSiftData(&sd);
+        if (tally.errors != N)
+        {
+            std::cout << "  [FAIL] a successful call produced a report" << std::endl;
+            pass = false;
+        }
+    }
+
+    // 5. Turning the file off keeps the callback; turning the callback off silences it.
+    CusiftSetErrorLog(NULL, 0);
+    {
+        SiftData sd{};
+        ExtractSiftFromImage(&bad, &sd, &eo);
+        DeleteSiftData(&sd);
+    }
+    const size_t size_after_off = read_file(path).size();
+    CusiftSetErrorCallback(NULL, NULL);
+    {
+        SiftData sd{};
+        ExtractSiftFromImage(&bad, &sd, &eo);
+        DeleteSiftData(&sd);
+    }
+    if (tally.errors != N + 1 || size_after_off != content.size())
+    {
+        std::cout << "  [FAIL] disable semantics wrong (errors " << tally.errors << ", size " << size_after_off << ")" << std::endl;
+        pass = false;
+    }
+
+    std::remove(path.c_str());
+    std::remove(rotated.c_str());
+    std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
+    return pass;
+}
+
+// -- Test: input validation and device reset --------------
+
+static bool test_input_validation(const Image_t& im1, const Image_t& im2)
+{
+    std::cout << "[TEST] Input validation and CusiftResetDevice" << std::endl;
+    bool pass = true;
+    ExtractSiftOptions_t eo = default_extract_options();
+    char msg[256], file[256];
+    int line = 0;
+
+    // 1. Dimensions outside [8, 65535] must be rejected before any GPU work or
+    //    any read of the pixel buffer (the buffer here is far too small).
+    float dummy[64] = {0.0f};
+    struct Case { const char* name; int w, h; };
+    const Case cases[] = {{"4x4", 4, 4}, {"4000x1", 4000, 1}, {"70000x8", 70000, 8}, {"8x70000", 8, 70000}};
+    for (const Case& c : cases)
+    {
+        SiftData sd{};
+        Image_t bad = { dummy, c.w, c.h };
+        ExtractSiftFromImage(&bad, &sd, &eo);
+        bool rejected = CusiftHadError() != 0;
+        CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
+        std::cout << "  " << c.name << ": " << (rejected ? msg : "ACCEPTED (wrong)") << std::endl;
+        if (!rejected) pass = false;
+        DeleteSiftData(&sd);
+    }
+
+    // 2. A device pointer passed as host_img_ must be classified and rejected
+    //    on every path, including the CPU warp that used to dereference it.
+    {
+        SiftData sd1{}, sd2{};
+        FindHomographyOptions_t ho = default_homography_options();
+        float H[9]; int nm = 0;
+        ExtractSiftFromImage(&im1, &sd1, &eo);
+        ExtractSiftFromImage(&im2, &sd2, &eo);
+        MatchSiftData(&sd1, &sd2);
+        FindHomography(&sd1, H, &nm, &ho);
+        ImageStrided_t g1 = {}, g2 = {};
+        if (!check_error("setup") && homography_is_valid(H))
+        {
+            WarpImages_GPU(&im1, &im2, H, &g1, &g2);
+            if (!check_error("WarpImages_GPU") && g1.strided_img_)
+            {
+                Image_t dev = { g1.strided_img_, g1.width_, g1.height_ };   // device memory
+                SiftData sd3{};
+                ExtractSiftFromImage(&dev, &sd3, &eo);
+                bool rejected = CusiftHadError() != 0;
+                CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
+                std::cout << "  device pointer -> ExtractSiftFromImage: " << (rejected ? msg : "ACCEPTED (wrong)") << std::endl;
+                if (!rejected) pass = false;
+                DeleteSiftData(&sd3);
+
+                Image_t o1 = {}, o2 = {};
+                WarpImages(&dev, &im2, H, &o1, &o2, false);
+                rejected = CusiftHadError() != 0;
+                CusiftGetLastErrorString(&line, file, sizeof(file), msg, sizeof(msg));
+                std::cout << "  device pointer -> WarpImages (CPU): " << (rejected ? msg : "ACCEPTED (wrong)") << std::endl;
+                if (!rejected) pass = false;
+                FreeImage(&o1); FreeImage(&o2);
+            }
+        }
+        FreeImage_GPU(&g1); FreeImage_GPU(&g2);
+        DeleteSiftData(&sd1); DeleteSiftData(&sd2);
+    }
+
+    // 3. The reset must leave the device usable.  Every library object above
+    //    has been freed, as the contract requires.
+    CusiftResetDevice();
+    if (check_error("CusiftResetDevice")) pass = false;
+    {
+        SiftData sd{};
+        ExtractSiftFromImage(&im1, &sd, &eo);
+        if (check_error("ExtractSiftFromImage after reset") || sd.numPts <= 0) pass = false;
+        std::cout << "  after reset: " << sd.numPts << " keypoints" << std::endl;
+        DeleteSiftData(&sd);
+    }
+
+    std::cout << "  " << (pass ? "[PASS]" : "[FAIL]") << std::endl;
+    return pass;
+}
+
 // -- Main ------------------------------------------------
 
 int main(int argc, char* argv[])
@@ -1117,6 +1318,8 @@ int main(int argc, char* argv[])
     run(test_extract_match_homography_multi(im1, im2));
     run(test_extract_match_homography_multi_warp(im1, im2));
     run(test_estimate_vram(im1, im2));
+    run(test_error_log(im1));
+    run(test_input_validation(im1, im2)); // last: it resets the device
 
     std::cout << "========================================" << std::endl;
     std::cout << "Results: " << passed << " passed, " << failed << " failed, " << total << " total" << std::endl;

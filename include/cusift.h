@@ -43,6 +43,10 @@
  * - FreeImage()
  * - CusiftGetLastErrorString()
  * - CusiftHadError()
+ * - CusiftResetDevice()
+ * - CusiftSetErrorLog()
+ * - CusiftSetErrorCallback()
+ * - CusiftErrorLogDroppedCount()
  * - SaveSiftData()
  * - ExtractAndMatchSift()
  * - ExtractAndMatchAndFindHomography()
@@ -136,6 +140,102 @@ extern "C"
     CUSIFT_API int CusiftGetLastCudaError(void);
 
     /**
+     * @brief Recover from a sticky CUDA error by destroying and re-creating
+     *        this process's CUDA context on the current device.
+     *
+     * Some device errors are sticky: once a kernel has faulted (for example
+     * cudaErrorIllegalAddress, cudaErrorLaunchFailure, cudaErrorLaunchTimeout,
+     * cudaErrorECCUncorrectable or cudaErrorHardwareStackError), every later
+     * CUDA call in the process returns that same error until the context is
+     * reset. CusiftGetLastCudaError() returns the code so a caller can
+     * recognise the situation.
+     *
+     * The reset is process-local. It calls cudaDeviceReset(), which tears down
+     * only the calling process's context; other processes sharing the GPU are
+     * not affected. Inside this process, however, every device allocation is
+     * destroyed, including the device buffers of every SiftData and every
+     * ImageStrided_t warp output. Call DeleteSiftData() and FreeImage_GPU() on
+     * all of them before resetting, or at least never touch them afterwards,
+     * and make sure no other thread of this process is inside a library call.
+     * The function re-creates the context before returning and sets the error
+     * state if the device is still unusable.
+     */
+    CUSIFT_API void CusiftResetDevice(void);
+
+    /**
+     * @brief One error or warning, as delivered to an error callback.
+     *
+     * Every pointer is valid only for the duration of the callback; copy what
+     * you keep. severity is 0 for an error (the API call failed and
+     * CusiftHadError() is set) and 1 for a warning (the call completed in a
+     * degraded way: the AVX2 refinement path refusing to run on a CPU without
+     * AVX2, or a device free failing during cleanup).
+     */
+    typedef struct
+    {
+        int severity;                 /**< 0 = error, 1 = warning. */
+        const char *function;         /**< Public API function involved, e.g. "ExtractSiftFromImage". */
+        const char *file;             /**< Source file where the failure originated, or "". */
+        int line;                     /**< Source line, or 0. */
+        int cuda_error;               /**< cudaError_t value; 0 when the failure was not a CUDA error. */
+        const char *cuda_error_name;  /**< e.g. "cudaErrorIllegalAddress"; "" when cuda_error is 0. */
+        const char *message;          /**< Human-readable description. */
+        unsigned long long thread_id; /**< Hash of the calling thread's id. */
+        long long timestamp_ms;       /**< UTC Unix time in milliseconds. */
+    } CusiftErrorRecord_t;
+
+    typedef void (*CusiftErrorCallback_t)(const CusiftErrorRecord_t *record, void *user_data);
+
+    /**
+     * @brief Append every error and warning to a log file, in addition to the
+     *        thread-local error state.
+     *
+     * Off by default. Pass NULL to turn it off, "" to log to
+     * <temp dir>/cusift-errors.log (the platform temporary directory:
+     * TMPDIR/TMP/TEMP or /tmp on POSIX, GetTempPath on Windows), or an explicit
+     * path. max_bytes caps the file; 0 means 1 MiB. When a new line would push
+     * the file past the cap, the file is renamed to <path>.1 (replacing any
+     * previous .1) and started afresh, so disk use is bounded at twice the cap.
+     *
+     * Each line holds a UTC timestamp, the severity, the calling thread id, the
+     * public function, the source file and line, the CUDA error code and name,
+     * and the message. The file is opened, appended and closed per record, so a
+     * line is in the operating system's hands before the call returns; errors
+     * are rare, so this costs nothing measurable.
+     *
+     * Logging never fails or alters the call being logged. Records that could
+     * not be written (unwritable path, full disk) are counted; see
+     * CusiftErrorLogDroppedCount(). This function does not touch the thread-local
+     * error state.
+     *
+     * Without a call to this function, the environment variable CUSIFT_ERROR_LOG
+     * is consulted once, on the first error: its value is the path, or the word
+     * "default" for the temporary-directory file. CUSIFT_ERROR_LOG_MAX_BYTES sets
+     * the cap. A call to CusiftSetErrorLog() always takes precedence.
+     *
+     * @param path      NULL = off, "" = default location, otherwise the file to append to.
+     * @param max_bytes Rotation threshold in bytes; 0 = 1 MiB.
+     */
+    CUSIFT_API void CusiftSetErrorLog(const char *path, size_t max_bytes);
+
+    /**
+     * @brief Deliver every error and warning to a callback as well. NULL disables.
+     *
+     * The callback runs on the thread where the error occurred, after the
+     * thread-local error state has been set and after the log line (if any)
+     * has been written, and with no library lock held, so it may itself call
+     * CusiftSetErrorLog() or CusiftSetErrorCallback(). It must not throw.
+     * Process-wide: one callback for all threads.
+     */
+    CUSIFT_API void CusiftSetErrorCallback(CusiftErrorCallback_t callback, void *user_data);
+
+    /**
+     * @brief Number of records that could not be written to the error log since
+     *        the process started.
+     */
+    CUSIFT_API unsigned long long CusiftErrorLogDroppedCount(void);
+
+    /**
      * @brief A single SIFT keypoint with its 128-d descriptor.
      */
     typedef struct
@@ -180,9 +280,19 @@ extern "C"
     } SiftData;
 
     /**
-     * @brief A grayscale image stored as a contiguous float buffer.
-     * The host image can be on the CPU or GPU. The library functions will handle copying to/from the device as needed.
-     * We will not modify the input image data, ever.
+     * @brief A grayscale image stored as a contiguous float buffer in HOST memory.
+     *
+     * host_img_ must point to memory the CPU can read: ordinary pageable
+     * memory, pinned memory from cudaHostAlloc / cudaMallocHost, or managed
+     * memory from cudaMallocManaged. A pointer returned by cudaMalloc is not
+     * CPU-readable; every entry point classifies the pointer and rejects it
+     * with the error "host_img_ points to device memory" instead of faulting
+     * on it. Use ImageStrided_t for device-resident warp output.
+     *
+     * Both dimensions must be in [8, 65535] pixels: below 8 the three octaves
+     * the library always builds would contain an empty level, and above 65535
+     * the detector's 16-bit candidate positions and the per-row kernel grid
+     * no longer fit. The library never modifies the input image data.
      */
     typedef struct
     {

@@ -10,7 +10,8 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-from ctypes import POINTER, Structure, c_bool, c_char, c_float, c_int, c_uint
+from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char, c_char_p, c_float, c_int,
+                    c_longlong, c_size_t, c_uint, c_ulonglong, c_void_p)
 from pathlib import Path
 
 # -- ctypes struct mirrors of cusift.h ----------------------------------------
@@ -70,6 +71,26 @@ class WarpGeometry_t(Structure):
         ("corners1", (c_float * 2) * 4),
         ("corners2", (c_float * 2) * 4),
     ]
+
+
+class CusiftErrorRecord_t(Structure):
+    """Mirror of the C ``CusiftErrorRecord_t`` struct."""
+
+    _fields_ = [
+        ("severity", c_int),
+        ("function", c_char_p),
+        ("file", c_char_p),
+        ("line", c_int),
+        ("cuda_error", c_int),
+        ("cuda_error_name", c_char_p),
+        ("message", c_char_p),
+        ("thread_id", c_ulonglong),
+        ("timestamp_ms", c_longlong),
+    ]
+
+
+# void (*)(const CusiftErrorRecord_t *record, void *user_data)
+CusiftErrorCallback_t = CFUNCTYPE(None, POINTER(CusiftErrorRecord_t), c_void_p)
 
 
 class ExtractSiftOptions_t(Structure):
@@ -217,6 +238,18 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
         c_int, c_int,              # image_width2, image_height2
         POINTER(WarpGeometry_t),   # geometry (out)
     ]
+
+    # Process-local device reset after a sticky CUDA error
+    lib.CusiftResetDevice.restype = None
+    lib.CusiftResetDevice.argtypes = []
+
+    # Error log file and callback
+    lib.CusiftSetErrorLog.restype = None
+    lib.CusiftSetErrorLog.argtypes = [c_char_p, c_size_t]
+    lib.CusiftSetErrorCallback.restype = None
+    lib.CusiftSetErrorCallback.argtypes = [CusiftErrorCallback_t, c_void_p]
+    lib.CusiftErrorLogDroppedCount.restype = c_ulonglong
+    lib.CusiftErrorLogDroppedCount.argtypes = []
 
     # Cleanup
     lib.DeleteSiftData.restype = None

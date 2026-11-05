@@ -52,7 +52,7 @@ src/
     RAII_Guards.hpp          Device/host pointer guards
     cudaSift.h               Internal aggregate header
 test/
-    main.cpp                 18-test correctness/regression suite
+    main.cpp                 20-test correctness/regression suite
     speed.cpp                Multi-resolution benchmarking harness
     img1.png, img2.png       Sample image pair
 docs/
@@ -76,10 +76,13 @@ cmake/
 - CMake 3.23 or newer.
 - (Optional) Python 3.8+ for `cusift_py`.
 
-Supported GPU architectures default to **75, 80, 86, 89** (Turing through Ada
-Lovelace). Override with `-DCMAKE_CUDA_ARCHITECTURES="..."` or pass
-`-DCUSIFT_ALL_CUDA_ARCHS=ON` to compile for every architecture supported by
-your toolkit.
+By default the build compiles one cubin per **major** architecture your
+toolkit supports plus PTX for the newest (`CMAKE_CUDA_ARCHITECTURES=all-major`).
+A cubin for X.0 runs on every X.y, so this covers every GPU the toolkit can
+drive, including Jetson Orin (8.7). For a build tuned to one board pass
+`-DCMAKE_CUDA_ARCHITECTURES=87` (Orin) or `72` (Xavier, CUDA 11/12 toolkits;
+CUDA 13 no longer supports Volta-class parts), and pass
+`-DCUSIFT_ALL_CUDA_ARCHS=ON` for a cubin per minor architecture.
 
 ## Building
 
@@ -120,7 +123,7 @@ Expected output ends with:
 
 ```
 ========================================
-Results: 18 passed, 0 failed, 18 total
+Results: 20 passed, 0 failed, 20 total
 ```
 
 For benchmarking across multiple input resolutions:
@@ -247,6 +250,9 @@ documented inline. The big picture:
 | `SaveSiftData`                                   | Persist a `SiftData` to JSON.                      |
 | `DeleteSiftData`, `FreeImage`, `FreeImage_GPU`   | Resource cleanup.                                  |
 | `CusiftHadError`, `CusiftGetLastErrorString`     | Error reporting.                                   |
+| `CusiftResetDevice`                              | Process-local context reset after a sticky CUDA error. |
+| `CusiftSetErrorLog`, `CusiftSetErrorCallback`    | Append every error to a file and/or deliver it to a callback. |
+| `CusiftErrorLogDroppedCount`                     | Records the log could not write.                   |
 | `EstimateVram*`                                  | Pre-flight VRAM accounting for every stage.        |
 
 ## Error handling
@@ -261,6 +267,30 @@ if (CusiftHadError()) {
     /* report and recover */
 }
 ```
+
+### Error log and callback
+
+Every error, and the few warnings the library can emit (the AVX2 refinement
+path refusing to run on a CPU without AVX2, a device free failing during
+cleanup), can also be appended to a file and delivered to a callback,
+independent of the thread-local state:
+
+```c
+CusiftSetErrorLog("", 0);                        /* "" = <temp dir>/cusift-errors.log, 0 = 1 MiB cap */
+CusiftSetErrorLog("/var/log/cusift.log", 4u << 20);
+CusiftSetErrorLog(NULL, 0);                      /* off (the default) */
+CusiftSetErrorCallback(my_handler, user_data);   /* NULL disables */
+```
+
+Each line carries a UTC timestamp, severity, thread id, the public function,
+source location, CUDA error code and name, and the message. When a line would
+push the file past the cap, the file is renamed to `<path>.1` and restarted, so
+disk use is bounded at twice the cap. Logging never fails the call being
+logged; records that could not be written are counted by
+`CusiftErrorLogDroppedCount()`. The file can also be enabled without a code
+change through `CUSIFT_ERROR_LOG=<path>` (or `default`) and
+`CUSIFT_ERROR_LOG_MAX_BYTES`, read on the first error if `CusiftSetErrorLog`
+was never called.
 
 ## VRAM estimation
 

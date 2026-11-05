@@ -307,7 +307,19 @@ void FreeSiftData(SiftData *data)
     // Use cudaFree directly (not safeCall) so this function is safe
     // to call from destructors during stack unwinding.
     if (data->d_data != NULL)
-        cudaFree(data->d_data);
+    {
+        cudaError_t e = cudaFree(data->d_data);
+        if (e != cudaSuccess)
+        {
+            // Typically a stale handle after CusiftResetDevice(), or a sticky
+            // device error.  Clear the flag and report it as a warning; this
+            // path must stay non-throwing because it runs during unwinding.
+            (void)cudaGetLastError();
+            char buf[160];
+            snprintf(buf, sizeof(buf), "cudaFree of the device keypoint buffer failed: %s", cudaGetErrorString(e));
+            cusift_report_warning("DeleteSiftData", buf);
+        }
+    }
     data->d_data = NULL;
     if (data->h_data != NULL)
         free(data->h_data);
