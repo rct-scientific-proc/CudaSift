@@ -297,5 +297,26 @@ def load_library(dll_path: str | Path | None = None) -> ctypes.CDLL:
         POINTER(cusift_image),   # warped2 (out)
     ]
 
+    # -- Device memory estimates (host-only, allocate nothing) ------------
+
+    lib.cusift_memory_extract.restype = c_size_t
+    lib.cusift_memory_extract.argtypes = [c_int, c_int, POINTER(cusift_extract_options)]
+
+    lib.cusift_memory_match.restype = c_size_t
+    lib.cusift_memory_match.argtypes = [c_int, c_int]
+
+    lib.cusift_memory_homography.restype = c_size_t
+    lib.cusift_memory_homography.argtypes = [c_int, POINTER(cusift_homography_options)]
+
+    lib.cusift_memory_warp.restype = c_size_t
+    lib.cusift_memory_warp.argtypes = [c_int, c_int, c_int, c_int]
+
+    lib.cusift_memory_pipeline.restype = c_size_t
+    lib.cusift_memory_pipeline.argtypes = [
+        c_int, c_int,                         # width1, height1
+        c_int, c_int,                         # width2, height2
+        POINTER(cusift_extract_options),
+        POINTER(cusift_homography_options),
+    ]
 
     return lib

@@ -86,12 +86,15 @@ cmake/
 - (Optional) Python 3.8+ for `cusift_py`.
 
 By default the build compiles one cubin per **major** architecture your
-toolkit supports plus PTX for the newest (`CMAKE_CUDA_ARCHITECTURES=all-major`).
+toolkit supports plus PTX for the newest (`CUSIFT_CUDA_ARCHITECTURES=all-major`).
 A cubin for X.0 runs on every X.y, so this covers every GPU the toolkit can
 drive, including Jetson Orin (8.7). For a build tuned to one board pass
-`-DCMAKE_CUDA_ARCHITECTURES=87` (Orin) or `72` (Xavier, CUDA 11/12 toolkits;
+`-DCUSIFT_CUDA_ARCHITECTURES=87` (Orin) or `72` (Xavier, CUDA 11/12 toolkits;
 CUDA 13 no longer supports Volta-class parts), and pass
-`-DCUSIFT_ALL_CUDA_ARCHS=ON` for a cubin per minor architecture.
+`-DCUSIFT_ALL_CUDA_ARCHS=ON` for a cubin per minor architecture. The project
+writes `CMAKE_CUDA_ARCHITECTURES` from this setting on every configure, so a
+value cached by an earlier configure (or passed directly) is replaced, with a
+status message saying so.
 
 ## Building
 
@@ -104,12 +107,13 @@ cmake --build build --config Release -j
 
 CMake options:
 
-| Option                  | Default | Description                                     |
-| ----------------------- | ------- | ----------------------------------------------- |
-| `CUSIFT_BUILD_SHARED`   | `OFF`   | Build `cusift` as a shared library (DLL/.so).   |
-| `CUSIFT_USE_FAST_MATH`  | `OFF`   | Compile CUDA with `--use_fast_math`.            |
-| `CUSIFT_ALL_CUDA_ARCHS` | `OFF`   | Build for every architecture supported by NVCC. |
-| `CUSIFT_ENABLE_AVX2`    | `ON`    | Vectorise the refinement on x86 hosts.          |
+| Option                      | Default     | Description                                     |
+| --------------------------- | ----------- | ----------------------------------------------- |
+| `CUSIFT_BUILD_SHARED`       | `OFF`       | Build `cusift` as a shared library (DLL/.so).   |
+| `CUSIFT_USE_FAST_MATH`      | `OFF`       | Compile CUDA with `--use_fast_math`.            |
+| `CUSIFT_CUDA_ARCHITECTURES` | `all-major` | Architectures to build for (`CMAKE_CUDA_ARCHITECTURES` syntax). |
+| `CUSIFT_ALL_CUDA_ARCHS`     | `OFF`       | Build for every architecture supported by NVCC. |
+| `CUSIFT_ENABLE_AVX2`        | `ON`        | Vectorise the refinement on x86 hosts.          |
 
 To install:
 
@@ -226,6 +230,9 @@ matches = sift.match(kp1, kp2)
 H, inliers = sift.estimate_homography(kp1)
 warped1, warped2 = sift.warp(img1, img2, H)       # NaN where no source covers a pixel
 canvas = sift.compute_canvas(H, *img1.shape[::-1], *img2.shape[::-1])
+
+# pre-flight device-memory estimate in bytes (also memory_extract/_match/_homography/_warp)
+need = sift.memory_pipeline(*img1.shape[::-1], *img2.shape[::-1])
 ```
 
 `ExtractOptions` and `HomographyOptions` carry the same field names and

@@ -31,6 +31,8 @@ from cusift._bindings import (
 # Python ValueError is friendlier than a CuSiftError from inside the call.
 _MAX_KEYPOINTS_LIMIT = (2**31 - 1) // ctypes.sizeof(cusift_keypoint)
 _MAX_RANSAC_LOOPS = 65535 * 16
+_MIN_IMAGE_DIM = 8
+_MAX_IMAGE_DIM = 65535
 
 
 # -- Exceptions ---------------------------------------------------------------
@@ -308,6 +310,30 @@ def _make_image_t(pixels: np.ndarray, width: int, height: int) -> tuple[cusift_i
     img.width = width
     img.height = height
     return img, pixels
+
+
+def _check_dims(label: str, width: int, height: int) -> tuple[int, int]:
+    """Validate an image size against the library's [8, 65535] limit.
+
+    The ``cusift_memory_*`` functions do not validate their arguments or set
+    the error state: a zero dimension reaches ``log2(0)`` and a negative one
+    wraps to a huge ``size_t``.  So the checks are done here, with the same
+    bounds the extraction and warp entry points enforce.
+    """
+    w, h = int(width), int(height)
+    if not (_MIN_IMAGE_DIM <= w <= _MAX_IMAGE_DIM and _MIN_IMAGE_DIM <= h <= _MAX_IMAGE_DIM):
+        raise ValueError(
+            f"{label}: width and height must be in [{_MIN_IMAGE_DIM}, {_MAX_IMAGE_DIM}], got {w}x{h}"
+        )
+    return w, h
+
+
+def _check_capacity(label: str, capacity: int) -> int:
+    """Validate a keypoint capacity against the same bound as ``max_keypoints``."""
+    c = int(capacity)
+    if not (1 <= c <= _MAX_KEYPOINTS_LIMIT):
+        raise ValueError(f"{label} must be in [1, {_MAX_KEYPOINTS_LIMIT}], got {capacity}")
+    return c
 
 
 def _load_image_grayscale(path: Union[str, Path]) -> tuple[np.ndarray, int, int]:
@@ -893,6 +919,79 @@ class CuSift:
             err.geometry = Canvas._from_ctypes(geom_ct)  # type: ignore[attr-defined]
             raise
         return Canvas._from_ctypes(geom_ct)
+
+    # -- Device memory estimates ------------------------------------------
+    #
+    # Host-only and allocation-free: each returns the peak device memory, in
+    # bytes, a stage would need, so a caller can check it against the free
+    # memory of a small board before running anything.  The C functions do
+    # not validate their arguments, so these methods do (ValueError).
+
+    def memory_extract(
+        self,
+        width: int,
+        height: int,
+        options: Optional[ExtractOptions] = None,
+    ) -> int:
+        """Peak device memory, in bytes, that :meth:`extract` needs for an image
+        of this size (C ``cusift_memory_extract``): keypoint buffer, image copy,
+        scale-space pyramid, sort temporaries and context.
+        """
+        w, h = _check_dims("image", width, height)
+        opts_ct = (options or ExtractOptions())._to_ctypes()
+        return int(self._lib.cusift_memory_extract(w, h, byref(opts_ct)))
+
+    def memory_match(self, capacity1: int, capacity2: int) -> int:
+        """Device memory, in bytes, held by two keypoint sets of these
+        capacities during :meth:`match` (C ``cusift_memory_match``).
+
+        The capacity of a set is the ``max_keypoints`` it was extracted with.
+        """
+        c1 = _check_capacity("capacity1", capacity1)
+        c2 = _check_capacity("capacity2", capacity2)
+        return int(self._lib.cusift_memory_match(c1, c2))
+
+    def memory_homography(
+        self,
+        capacity: int,
+        options: Optional[HomographyOptions] = None,
+    ) -> int:
+        """Device memory, in bytes, that :meth:`estimate_homography` needs for a
+        keypoint set of this capacity: the set plus the RANSAC temporaries
+        (C ``cusift_memory_homography``).
+        """
+        c = _check_capacity("capacity", capacity)
+        opts_ct = (options or HomographyOptions())._to_ctypes()
+        return int(self._lib.cusift_memory_homography(c, byref(opts_ct)))
+
+    def memory_warp(self, width1: int, height1: int, width2: int, height2: int) -> int:
+        """Peak device memory, in bytes, of a GPU :meth:`warp` (C ``cusift_memory_warp``).
+
+        Assumes the worst-case canvas of twice the larger input in each axis;
+        :meth:`compute_canvas` gives the exact canvas once the homography is known.
+        """
+        w1, h1 = _check_dims("image1", width1, height1)
+        w2, h2 = _check_dims("image2", width2, height2)
+        return int(self._lib.cusift_memory_warp(w1, h1, w2, h2))
+
+    def memory_pipeline(
+        self,
+        width1: int,
+        height1: int,
+        width2: int,
+        height2: int,
+        *,
+        extract_options: Optional[ExtractOptions] = None,
+        homography_options: Optional[HomographyOptions] = None,
+    ) -> int:
+        """Peak device memory, in bytes, across :meth:`align_and_warp`: the
+        maximum over its stages (C ``cusift_memory_pipeline``).
+        """
+        w1, h1 = _check_dims("image1", width1, height1)
+        w2, h2 = _check_dims("image2", width2, height2)
+        eo = (extract_options or ExtractOptions())._to_ctypes()
+        ho = (homography_options or HomographyOptions())._to_ctypes()
+        return int(self._lib.cusift_memory_pipeline(w1, h1, w2, h2, byref(eo), byref(ho)))
 
     # -- Convenience combo pipelines --------------------------------------
 

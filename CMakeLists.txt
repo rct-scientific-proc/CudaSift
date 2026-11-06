@@ -3,21 +3,31 @@ cmake_minimum_required(VERSION 3.23)
 # ── CUDA architecture ───────────────────────────────────
 # This must run BEFORE project(): enabling the CUDA language inside project()
 # defines CMAKE_CUDA_ARCHITECTURES from nvcc's own default (a single
-# architecture), after which a "NOT DEFINED" check never fires and the project
-# default is silently ignored.  A -DCMAKE_CUDA_ARCHITECTURES=... on the command
-# line is already defined here and wins.
+# architecture) and caches it.  Because the cache entry then exists on every
+# later configure, a "NOT DEFINED CMAKE_CUDA_ARCHITECTURES" guard only works
+# for a brand-new build directory; an existing one keeps whatever it cached
+# first.  So the project owns the choice through CUSIFT_CUDA_ARCHITECTURES
+# and writes CMAKE_CUDA_ARCHITECTURES from it on every configure.
+#
+# The default is one cubin per major architecture the toolkit supports, plus
+# PTX for the newest.  A cubin built for X.0 runs on every X.y, so this
+# covers every GPU the toolkit can drive, Jetson Orin (8.7) included, at a
+# fraction of the build time of "all".  Pass -DCUSIFT_CUDA_ARCHITECTURES=87
+# (or 72 for Xavier under CUDA 11/12) for a build tuned to one board, or
+# -DCUSIFT_ALL_CUDA_ARCHS=ON for a cubin per minor architecture.
 option(CUSIFT_ALL_CUDA_ARCHS "Build for all supported CUDA architectures" OFF)
+set(CUSIFT_CUDA_ARCHITECTURES "all-major" CACHE STRING
+  "CUDA architectures to build for, in CMAKE_CUDA_ARCHITECTURES syntax (all-major, all, native, or a list such as 87)")
 if(CUSIFT_ALL_CUDA_ARCHS)
-  set(CMAKE_CUDA_ARCHITECTURES all)
-elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  # One cubin per major architecture the toolkit supports, plus PTX for the
-  # newest.  A cubin built for X.0 runs on every X.y, so this covers every GPU
-  # the toolkit can drive, Jetson Orin (8.7) included, at a fraction of the
-  # build time of "all".  Pass -DCMAKE_CUDA_ARCHITECTURES=87 (or 72 for
-  # Xavier under CUDA 11/12) for a build tuned to one board, or
-  # -DCUSIFT_ALL_CUDA_ARCHS=ON for a cubin per minor architecture.
-  set(CMAKE_CUDA_ARCHITECTURES all-major)
+  set(_cusift_archs all)
+else()
+  set(_cusift_archs "${CUSIFT_CUDA_ARCHITECTURES}")
 endif()
+if(DEFINED CACHE{CMAKE_CUDA_ARCHITECTURES} AND NOT "$CACHE{CMAKE_CUDA_ARCHITECTURES}" STREQUAL "${_cusift_archs}")
+  message(STATUS "cusift: replacing cached CMAKE_CUDA_ARCHITECTURES=$CACHE{CMAKE_CUDA_ARCHITECTURES} with ${_cusift_archs}; set CUSIFT_CUDA_ARCHITECTURES to change it")
+endif()
+set(CMAKE_CUDA_ARCHITECTURES "${_cusift_archs}" CACHE STRING "CUDA architectures (derived from CUSIFT_CUDA_ARCHITECTURES)" FORCE)
+unset(_cusift_archs)
 
 project(cudaSift
   VERSION 3.0.0
@@ -43,7 +53,14 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
 option(CUSIFT_USE_FAST_MATH  "Compile CUDA code with --use_fast_math"             OFF)
 option(CUSIFT_ENABLE_AVX2    "Compile geomFuncs.c with AVX2 + FMA (x86/x64 only)" ON)
-# CUSIFT_ALL_CUDA_ARCHS is declared above project(), where it has to be.
+# CUSIFT_ALL_CUDA_ARCHS and CUSIFT_CUDA_ARCHITECTURES are declared above
+# project(), where they have to be.
+
+# Position-independent code for every target, static library included, so a
+# Linux consumer can link libcusift.a into a shared object (a plugin or a
+# Python extension) without "recompile with -fPIC" link errors.  Shared
+# libraries get it anyway; on MSVC it is a no-op.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Detect whether the host architecture even supports AVX2 / FMA. On non-x86
 # targets (e.g. arm64) the AVX2 path is unconditionally skipped, regardless
@@ -79,14 +96,17 @@ target_include_directories(cusift_cuda PRIVATE
 )
 target_compile_definitions(cusift_cuda PRIVATE VERBOSE)
 
+# Optimisation level is left to CMAKE_CUDA_FLAGS_<CONFIG>: nvcc forwards an
+# explicit -O2 to the host compiler, and on MSVC that collides with the /RTC1
+# in the Debug flags ("D8016: '/RTC1' and '/O2' are incompatible").
 if(MSVC)
   target_compile_options(cusift_cuda PRIVATE
-    -O2 --Werror cross-execution-space-call
+    --Werror cross-execution-space-call
     -Xcompiler=/W4 -Xcompiler=/Zc:preprocessor
   )
 else()
   target_compile_options(cusift_cuda PRIVATE
-    -O2 --Werror cross-execution-space-call
+    --Werror cross-execution-space-call
     -Xcompiler=-Wall,-Wextra
   )
 endif()
@@ -97,7 +117,6 @@ endif()
 
 # ── cusift library (C/C++ sources + CUDA objects) ────────
 if(CUSIFT_BUILD_SHARED)
-  set_target_properties(cusift_cuda PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_compile_definitions(cusift_cuda PRIVATE CUSIFT_EXPORTS)
   add_library(cusift SHARED ${C_SOURCES} $<TARGET_OBJECTS:cusift_cuda>)
   target_compile_definitions(cusift PRIVATE CUSIFT_EXPORTS)
@@ -125,9 +144,11 @@ target_include_directories(cusift
 
 target_compile_definitions(cusift PRIVATE VERBOSE)
 
-# C/C++ compile options (no COMPILE_LANGUAGE guards needed — only C sources in this target)
+# C/C++ compile options (no COMPILE_LANGUAGE guards needed — only C sources in
+# this target).  No explicit /O2 or -O2: the per-configuration flags set it,
+# and /O2 is incompatible with the /RTC1 that MSVC Debug builds carry.
 if(MSVC)
-  target_compile_options(cusift PRIVATE /W4 /O2 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
+  target_compile_options(cusift PRIVATE /W4 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
   if(CUSIFT_ENABLE_AVX2 AND _CUSIFT_X86)
     set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     message(STATUS "cusift: building geomFuncs.c with AVX2 + FMA (/arch:AVX2)")
@@ -135,7 +156,7 @@ if(MSVC)
     message(STATUS "cusift: building geomFuncs.c with scalar fallback (no AVX2)")
   endif()
 else()
-  target_compile_options(cusift PRIVATE -Wall -Wextra -Wpedantic -O2)
+  target_compile_options(cusift PRIVATE -Wall -Wextra -Wpedantic)
   if(CUSIFT_ENABLE_AVX2 AND _CUSIFT_X86)
     set_source_files_properties(src/geomFuncs.c PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
     message(STATUS "cusift: building geomFuncs.c with AVX2 + FMA (-mavx2 -mfma)")
@@ -148,11 +169,19 @@ endif()
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(cusift PRIVATE CUDA::cudart_static)
 
-# Link OpenMP if available
+# Link OpenMP if available.  The only OpenMP code is the host-side warp loop
+# in cusift.cu, which nvcc compiles, so the flag has to be forwarded to the
+# host compiler by hand: OpenMP::OpenMP_CXX only applies its flags to CXX
+# sources and the cusift target has none.  This applies to MSVC too
+# (-Xcompiler=-openmp), otherwise the pragma is silently ignored there and
+# the CPU warp runs single-threaded.  Spaces become commas because nvcc
+# splits -Xcompiler values on commas, not spaces.
 if(OpenMP_CXX_FOUND)
   target_link_libraries(cusift PRIVATE OpenMP::OpenMP_CXX)
-  if(NOT MSVC AND OpenMP_CXX_FLAGS)
-    target_compile_options(cusift_cuda PRIVATE -Xcompiler=${OpenMP_CXX_FLAGS})
+  if(OpenMP_CXX_FLAGS)
+    string(REPLACE " " "," _cusift_omp_flags "${OpenMP_CXX_FLAGS}")
+    target_compile_options(cusift_cuda PRIVATE "-Xcompiler=${_cusift_omp_flags}")
+    unset(_cusift_omp_flags)
   endif()
 endif()
 
@@ -169,6 +198,15 @@ target_link_libraries(cusift_speed PRIVATE cusift)
 # ── Install ──────────────────────────────────────────────
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+
+# Installed executables must find the installed shared library next door
+# (<prefix>/bin -> <prefix>/lib) without LD_LIBRARY_PATH.  Ignored on Windows,
+# where the DLL sits in the same bin/ directory.
+if(CUSIFT_BUILD_SHARED)
+  set_target_properties(cusift_demo cusift_speed PROPERTIES
+    INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+  )
+endif()
 
 install(TARGETS cusift
   EXPORT cusiftTargets
@@ -206,6 +244,14 @@ install(EXPORT cusiftTargets
 # Generated alongside the build tree so consumers using add_subdirectory()
 # can also resolve cusift::cusift identically to the install path.
 add_library(cusift::cusift ALIAS cusift)
+
+# A static cusift carries its private link dependencies into the export as
+# $<LINK_ONLY:...>, so the consumer's find_package(cusift) must locate the
+# OpenMP::OpenMP_CXX target too; the config template reads this flag.
+set(CUSIFT_CONFIG_NEEDS_OPENMP OFF)
+if(NOT CUSIFT_BUILD_SHARED AND OpenMP_CXX_FOUND)
+  set(CUSIFT_CONFIG_NEEDS_OPENMP ON)
+endif()
 
 configure_package_config_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cusiftConfig.cmake.in"

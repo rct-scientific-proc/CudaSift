@@ -17,7 +17,6 @@
 #include <climits>
 #include <string>
 #include <random>
-#include <omp.h>
 #include <chrono>
 #include <cstdio>
 #include <ctime>

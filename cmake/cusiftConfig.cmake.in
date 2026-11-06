@@ -3,6 +3,15 @@
 include(CMakeFindDependencyMacro)
 find_dependency(CUDAToolkit)
 
+# A static cusift links the CUDA runtime and OpenMP privately, which CMake
+# exports as $<LINK_ONLY:...> on cusift::cusift; the targets those names
+# refer to have to exist before the export file is read.  Consumers of the
+# static library therefore need the CXX language enabled, since that is the
+# component the OpenMP target was created for.
+if(@CUSIFT_CONFIG_NEEDS_OPENMP@)
+  find_dependency(OpenMP COMPONENTS CXX)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/cusiftTargets.cmake")
 
 check_required_components(cusift)
