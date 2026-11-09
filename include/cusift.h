@@ -139,8 +139,10 @@ extern "C"
      *        thread-local error state.
      *
      * Off by default. Pass NULL to turn it off, "" to log to
-     * <temp dir>/cusift-errors.log (TMPDIR/TMP/TEMP or /tmp on POSIX,
-     * GetTempPath on Windows), or an explicit path. max_bytes caps the file;
+     * <temp dir>/cusift-errors.log (the first set one of TMPDIR, TMP, TEMP,
+     * TEMPDIR, else /tmp, on POSIX; the first set one of TMP, TEMP,
+     * USERPROFILE, else the current directory, on Windows), or an explicit
+     * path. max_bytes caps the file;
      * 0 means 1 MiB. When a new line would push the file past the cap, the
      * file is renamed to <path>.1 (replacing any previous .1) and started
      * afresh, so disk use is bounded at twice the cap.

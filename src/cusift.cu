@@ -20,7 +20,6 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
-#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <mutex>
@@ -211,13 +210,55 @@ ErrorSinkConfig &sinks()
 
 const size_t kDefaultLogMaxBytes = (size_t)1 << 20;
 
+// The log sink deliberately avoids <filesystem>: on GCC 8 and older libc++ it
+// lives in a separate library (-lstdc++fs / -lc++fs) that every consumer of
+// the static library would have to link by hand, and GCC 7 (JetPack 4) has no
+// <filesystem> at all.  The four operations needed here have C equivalents.
+
+// What std::filesystem::temp_directory_path() does: the platform's
+// environment variables in its order, then the platform's fallback.
+std::string temp_directory()
+{
+#ifdef _WIN32
+    static const char *const vars[] = {"TMP", "TEMP", "USERPROFILE"};
+    const char *fallback = ".";
+#else
+    static const char *const vars[] = {"TMPDIR", "TMP", "TEMP", "TEMPDIR"};
+    const char *fallback = "/tmp";
+#endif
+    for (const char *var : vars)
+    {
+        const char *v = std::getenv(var);
+        if (v && *v)
+            return v;
+    }
+    return fallback;
+}
+
 std::string default_log_path()
 {
-    std::error_code ec;
-    std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
-    if (ec)
-        dir = ".";
-    return (dir / "cusift-errors.log").string();
+    std::string dir = temp_directory();
+    while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\'))
+        dir.pop_back();
+#ifdef _WIN32
+    return dir + "\\cusift-errors.log";
+#else
+    return dir + "/cusift-errors.log";
+#endif
+}
+
+// Size of an existing file; false when it cannot be opened, in which case
+// there is nothing to rotate.
+bool file_size(const std::string &path, unsigned long long &size)
+{
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f)
+        return false;
+    std::streamoff end = f.tellg();
+    if (end < 0)
+        return false;
+    size = (unsigned long long)end;
+    return true;
 }
 
 // Mutex held.
@@ -278,21 +319,15 @@ std::string format_record(const cusift_error_record &r)
 // Mutex held.  Rotate when the next line would push the file past the cap.
 void write_line(ErrorSinkConfig &c, const std::string &line)
 {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path p(c.log_path);
-    auto size = fs::file_size(p, ec);
-    if (!ec && size + line.size() > c.max_bytes)
+    unsigned long long size = 0;
+    if (file_size(c.log_path, size) && size + line.size() > c.max_bytes)
     {
-        fs::path old = p;
-        old += ".1";
-        fs::remove(old, ec);
-        ec.clear();
-        fs::rename(p, old, ec);
-        if (ec)
-            fs::remove(p, ec); // could not rotate: start over in place
+        const std::string old = c.log_path + ".1";
+        std::remove(old.c_str()); // usually absent; rename below needs it gone on Windows
+        if (std::rename(c.log_path.c_str(), old.c_str()) != 0)
+            std::remove(c.log_path.c_str()); // could not rotate: start over in place
     }
-    std::ofstream f(p, std::ios::app);
+    std::ofstream f(c.log_path, std::ios::app);
     if (!f)
     {
         c.dropped++;
