@@ -69,6 +69,32 @@ option(CUSIFT_STATIC_RUNTIME "Link the C and C++ runtimes statically into the sh
 if(CUSIFT_STATIC_RUNTIME AND MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
+if(CUSIFT_STATIC_RUNTIME AND NOT MSVC)
+  # Probe the toolchain once: -static-libstdc++ needs libstdc++.a, which
+  # Debian/Ubuntu ship with g++ but RHEL-family systems keep in a separate
+  # libstdc++-static package that a locked-down machine may not have.
+  # Without it the GCC driver turns the flag into -Bstatic -lstdc++ and the
+  # build dies late with "cannot find -lstdc++"; better to stop here and say
+  # what the alternatives are.  (libgcc.a comes with the compiler itself.)
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_LINK_OPTIONS -static-libstdc++ -static-libgcc)
+  check_cxx_source_compiles("
+#include <iostream>
+#include <string>
+int main() { std::string s(\"static runtime\"); std::cout << s << std::endl; return 0; }
+" CUSIFT_HAVE_STATIC_RUNTIME)
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
+  if(NOT CUSIFT_HAVE_STATIC_RUNTIME)
+    message(FATAL_ERROR
+      "CUSIFT_STATIC_RUNTIME=ON, but this toolchain cannot link libstdc++ statically "
+      "(no libstdc++.a; the CMake configure log has the linker's output). Either install "
+      "it (the libstdc++-static package on RHEL-family systems; it comes with g++ on "
+      "Debian/Ubuntu) and delete CUSIFT_HAVE_STATIC_RUNTIME from the cache, or configure "
+      "with -DCUSIFT_STATIC_RUNTIME=OFF and build with the GCC version your MATLAB "
+      "release supports, so that the libstdc++ MATLAB bundles satisfies the library "
+      "(see matlab/README.md).")
+  endif()
+endif()
 function(cusift_self_contained target)
   if(CUSIFT_STATIC_RUNTIME AND NOT MSVC)
     # Link with the C++ driver so CMake does not add its own explicit

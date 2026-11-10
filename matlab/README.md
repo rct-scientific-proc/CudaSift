@@ -40,6 +40,20 @@ readelf -d build/libcusift_matlab.so | grep NEEDED      # no libstdc++.so.6
 objdump -T build/libcusift_matlab.so | grep -c GLIBCXX   # 0
 ```
 
+**Linux without `libstdc++.a`.** `CUSIFT_STATIC_RUNTIME=ON` needs the
+static libstdc++ archive. Debian and Ubuntu install it with `g++`; RHEL-family
+systems keep it in the separate `libstdc++-static` package, which a
+locked-down machine may not have (`libgcc.a` for `-static-libgcc` comes with
+the compiler itself). The configure step probes for it and stops with a
+message rather than failing later with `cannot find -lstdc++`. Where the
+package cannot be installed, leave the option off and build with the GCC
+version your MATLAB release lists as its supported MEX compiler: the library
+then needs no symbol newer than the `libstdc++.so.6` MATLAB bundles, which is
+the arrangement MathWorks assumes. If a newer GCC is unavoidable, the usual
+workaround is to start MATLAB with the system library preloaded, for example
+`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 matlab`. Windows is not
+affected: the static CRT (`/MT`) is part of every MSVC installation.
+
 `cmake --install build --prefix <prefix>` puts the library in `<prefix>/bin`
 (Windows) or `<prefix>/lib`, the header in `<prefix>/include`, and these
 MATLAB files in `<prefix>/share/cusift/matlab`.
