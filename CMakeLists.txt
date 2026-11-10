@@ -53,8 +53,35 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 option(CUSIFT_BUILD_SHARED   "Build cusift as a shared library instead of static" OFF)
 option(CUSIFT_USE_FAST_MATH  "Compile CUDA code with --use_fast_math"             OFF)
 option(CUSIFT_ENABLE_AVX2    "Compile geomFuncs.c with AVX2 + FMA (x86/x64 only)" ON)
+option(CUSIFT_ENABLE_OPENMP  "Thread the host-side warp with OpenMP (adds a dependency on the OpenMP runtime library)" ON)
+option(CUSIFT_BUILD_MATLAB   "Build cusift_matlab, the loadlibrary-friendly shared library for MATLAB (see matlab/README.md)" OFF)
+option(CUSIFT_STATIC_RUNTIME "Link the C and C++ runtimes statically into the shared libraries, so they load into a process that carries its own, such as MATLAB" OFF)
 # CUSIFT_ALL_CUDA_ARCHS and CUSIFT_CUDA_ARCHITECTURES are declared above
 # project(), where they have to be.
+
+# A self-contained shared library: no msvcp140.dll / libstdc++.so.6 import.
+# The public API is C, no C++ object or exception crosses it, and the library
+# frees everything it allocates, so a private copy of the C++ runtime inside
+# the library is safe.  On MSVC this is the /MT CRT, applied to C, C++ and the
+# nvcc host passes alike (policy CMP0091); the GCC/Clang half is applied per
+# target by cusift_self_contained() below.  The OpenMP runtime cannot be
+# linked statically on MSVC; CUSIFT_ENABLE_OPENMP=OFF removes that import.
+if(CUSIFT_STATIC_RUNTIME AND MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+function(cusift_self_contained target)
+  if(CUSIFT_STATIC_RUNTIME AND NOT MSVC)
+    # Link with the C++ driver so CMake does not add its own explicit
+    # -lstdc++ (which would bypass -static-libstdc++) for the CUDA objects.
+    set_target_properties(${target} PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_options(${target} PRIVATE -static-libstdc++ -static-libgcc)
+    if(NOT APPLE)
+      # Keep the folded-in libstdc++ and cudart symbols out of the export
+      # table, so they cannot interpose on the host process's own copies.
+      target_link_options(${target} PRIVATE "LINKER:--exclude-libs,ALL")
+    endif()
+  endif()
+endfunction()
 
 # Position-independent code for every target, static library included, so a
 # Linux consumer can link libcusift.a into a shared object (a plugin or a
@@ -72,7 +99,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64|amd64|i[3-6]86|x86)")
 endif()
 
 # ── OpenMP ───────────────────────────────────────────────
-find_package(OpenMP COMPONENTS C CXX)
+if(CUSIFT_ENABLE_OPENMP)
+  find_package(OpenMP COMPONENTS C CXX)
+endif()
 
 message(STATUS "cusift: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
 
@@ -126,6 +155,7 @@ if(CUSIFT_BUILD_SHARED)
     VISIBILITY_INLINES_HIDDEN ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
   )
+  cusift_self_contained(cusift)
 else()
   add_library(cusift STATIC ${C_SOURCES} $<TARGET_OBJECTS:cusift_cuda>)
   target_compile_definitions(cusift PUBLIC CUSIFT_STATIC)
@@ -185,6 +215,47 @@ if(OpenMP_CXX_FOUND)
   endif()
 endif()
 
+# ── MATLAB façade: cusift_matlab shared library ─────────
+# One self-contained shared library holding the whole of cusift (the same C
+# sources and CUDA objects as the cusift target) plus the flat, handle-based
+# surface of include/cusift_matlab.h that MATLAB's loadlibrary can parse.  It
+# is deliberately not a MEX file: nothing in it is compiled with MATLAB's
+# toolchain, and it is loaded with loadlibrary('cusift_matlab', ...).
+if(CUSIFT_BUILD_MATLAB)
+  add_library(cusift_matlab SHARED src/cusift_matlab.cpp ${C_SOURCES} $<TARGET_OBJECTS:cusift_cuda>)
+  target_include_directories(cusift_matlab PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  # The CUDA objects were compiled with CUSIFT_EXPORTS or CUSIFT_STATIC; the
+  # façade's view of cusift.h has to match them.
+  if(CUSIFT_BUILD_SHARED)
+    target_compile_definitions(cusift_matlab PRIVATE CUSIFT_MATLAB_EXPORTS CUSIFT_EXPORTS)
+  else()
+    target_compile_definitions(cusift_matlab PRIVATE CUSIFT_MATLAB_EXPORTS CUSIFT_STATIC)
+  endif()
+  set_target_properties(cusift_matlab PROPERTIES
+    OUTPUT_NAME cusift_matlab
+    C_VISIBILITY_PRESET hidden
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  )
+  if(MSVC)
+    target_compile_options(cusift_matlab PRIVATE /W4 /Zc:preprocessor /D_CRT_SECURE_NO_WARNINGS)
+  else()
+    target_compile_options(cusift_matlab PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+  target_link_libraries(cusift_matlab PRIVATE CUDA::cudart_static)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(cusift_matlab PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  cusift_self_contained(cusift_matlab)
+  if(NOT CUSIFT_STATIC_RUNTIME)
+    message(STATUS "cusift: cusift_matlab will import the C++ runtime (msvcp140.dll / libstdc++.so.6); set CUSIFT_STATIC_RUNTIME=ON for a library MATLAB can load regardless of its own runtime")
+  endif()
+endif()
+
 # ── Demo executable ──────────────────────────────────────
 add_executable(cusift_demo test/main.cpp)
 target_include_directories(cusift_demo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
@@ -223,6 +294,19 @@ install(TARGETS cusift_demo cusift_speed
 install(FILES include/cusift.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+
+if(CUSIFT_BUILD_MATLAB)
+  # Not part of the cusiftTargets export: MATLAB loads it by file name.
+  install(TARGETS cusift_matlab
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+  install(FILES include/cusift_matlab.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  install(DIRECTORY matlab/ DESTINATION ${CMAKE_INSTALL_DATADIR}/cusift/matlab
+    FILES_MATCHING PATTERN "*.m" PATTERN "*.md"
+  )
+endif()
 
 install(DIRECTORY test/
   DESTINATION ${CMAKE_INSTALL_DATADIR}/cusift/test

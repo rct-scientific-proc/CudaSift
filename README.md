@@ -114,6 +114,9 @@ CMake options:
 | `CUSIFT_CUDA_ARCHITECTURES` | `all-major` | Architectures to build for (`CMAKE_CUDA_ARCHITECTURES` syntax). |
 | `CUSIFT_ALL_CUDA_ARCHS`     | `OFF`       | Build for every architecture supported by NVCC. |
 | `CUSIFT_ENABLE_AVX2`        | `ON`        | Vectorise the refinement on x86 hosts.          |
+| `CUSIFT_ENABLE_OPENMP`      | `ON`        | Thread the host-side warp (adds an OpenMP runtime dependency). |
+| `CUSIFT_BUILD_MATLAB`       | `OFF`       | Also build `cusift_matlab`, the `loadlibrary`-friendly library for MATLAB ([matlab/README.md](matlab/README.md)). |
+| `CUSIFT_STATIC_RUNTIME`     | `OFF`       | Link the C/C++ runtime into the shared libraries (`/MT`, `-static-libstdc++`), for hosts such as MATLAB that carry their own. |
 
 To install:
 
@@ -238,6 +241,21 @@ need = sift.memory_pipeline(*img1.shape[::-1], *img2.shape[::-1])
 `ExtractOptions` and `HomographyOptions` carry the same field names and
 defaults as the C structs. See `cusift_py/cusift/cusift.py` for the full
 surface and `cusift_py/test.py` for a runnable example.
+
+## MATLAB
+
+Build with `-DCUSIFT_BUILD_MATLAB=ON -DCUSIFT_STATIC_RUNTIME=ON` to get
+`cusift_matlab`, a self-contained shared library with a flat C surface
+(`include/cusift_matlab.h`) that MATLAB loads with `loadlibrary`; no MEX
+file is involved. The `CuSift` class in [matlab/](matlab/) wraps it:
+
+```matlab
+sift = CuSift();
+[kp1, kp2, H, inliers] = sift.align(imread('test/img1.png'), imread('test/img2.png'));
+[w1, w2] = sift.warp(img1, img2, H);
+```
+
+See [matlab/README.md](matlab/README.md) for loading, options and lifetimes.
 
 ## API surface
 
