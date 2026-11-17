@@ -43,8 +43,9 @@ fprintf('same homography as the staged run: %d\n', isequal(H, H2));
 fprintf('device memory for this pair: %.1f MiB\n', sift.memoryPipeline(size(img1), size(img2)) / 2^20);
 
 figure('Name', 'cusift');
-subplot(1, 2, 1); imshow(uint8(w1)); title('image 1 on the canvas');
-subplot(1, 2, 2); imshow(uint8(w2)); title('image 2 warped onto it');
+% Warped images are single in [0, 1], NaN where no source covers a pixel.
+subplot(1, 2, 1); imshow(w1, [0 1]); title('image 1 on the canvas');
+subplot(1, 2, 2); imshow(w2, [0 1]); title('image 2 warped onto it');
 
 % Keypoint sets free themselves when their objects are deleted; warped images
 % were copied into MATLAB arrays already.  Before unloadlibrary, run

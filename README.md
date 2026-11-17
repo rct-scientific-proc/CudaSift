@@ -149,6 +149,25 @@ For benchmarking across multiple input resolutions:
 ./build/Release/cusift_speed test/img1.png test/img2.png
 ```
 
+## Input intensity range
+
+The default options assume grayscale float32 images with intensities in
+**[0, 1]** (an 8-bit image divided by 255, a 16-bit one by 65535). The only
+option that depends on the intensity scale is `contrast_threshold`, which is
+compared against Difference-of-Gaussians responses in the image's own units;
+its default, 2/255 ≈ 0.00784, corresponds to two grey levels of an 8-bit
+image. Every other step (edge test, sub-pixel refinement, orientation,
+descriptors, matching, homography, warping) is invariant to the intensity
+scale, so data in any other range gives the same keypoints once
+`contrast_threshold` is scaled by the same factor.
+
+Versions up to 3.0 assumed [0, 255] and defaulted `contrast_threshold` to
+2.0. Code that still feeds [0, 255] data should either divide the pixels by
+255 or set `contrast_threshold = 2.0`; with the new default unchanged it
+would get a threshold 255 times too low and far more, weaker keypoints. The
+Python and MATLAB wrappers scale images loaded from files (and MATLAB
+integer images) to [0, 1] themselves.
+
 ## Quick start (C/C++)
 
 ```cpp
@@ -160,7 +179,8 @@ int main()
 {
     cusift_init();
 
-    // Two grayscale float32 images, row-major, values in [0, 255], in host memory.
+    // Two grayscale float32 images, row-major, values in [0, 1], in host memory
+    // (an 8-bit image divided by 255).
     std::vector<float> img1, img2;
     int w1, h1, w2, h2;
     /* ... fill in img1, img2, w1/h1, w2/h2 ... */
@@ -169,8 +189,8 @@ int main()
     cusift_image in2{img2.data(), w2, h2};
 
     cusift_extract_options extract_opts;
-    cusift_default_extract_options(&extract_opts);
-    extract_opts.contrast_threshold = 2.0f;
+    cusift_default_extract_options(&extract_opts);   // contrast_threshold 2/255, for [0, 1]
+    /* For [0, 255] data instead: extract_opts.contrast_threshold = 2.0f; */
 
     cusift_homography_options homography_opts;
     cusift_default_homography_options(&homography_opts);
@@ -219,8 +239,10 @@ from cusift import CuSift, HomographyOptions
 
 sift = CuSift()                      # finds build/Release/cusift.dll or libcusift.so
 
-img1 = np.asarray(Image.open("test/img1.png").convert("L"), dtype=np.float32)
-img2 = np.asarray(Image.open("test/img2.png").convert("L"), dtype=np.float32)
+# float32 in [0, 1], the range the default options assume (a file path works
+# too: extract("test/img1.png") loads and scales it the same way)
+img1 = np.asarray(Image.open("test/img1.png").convert("L"), dtype=np.float32) / 255
+img2 = np.asarray(Image.open("test/img2.png").convert("L"), dtype=np.float32) / 255
 
 kp1, kp2, matches, H, inliers = sift.align(
     img1, img2, homography_options=HomographyOptions(seed=42))

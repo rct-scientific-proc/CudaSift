@@ -26,7 +26,8 @@
  * kind is reported as an error, never dereferenced.
  *
  * @par Layout conventions
- * Images are float32, values in [0, 255], width x height pixels, row-major.
+ * Images are float32, values in [0, 1], width x height pixels, row-major
+ * (the default contrast_threshold assumes that range; use 2.0 for [0, 255]).
  * MATLAB stores matrices column by column, so pass single(img).' with
  * width = size(img, 2) and height = size(img, 1); a warped image copied out
  * with cusiftml_image_copy() into a width x height single matrix wants the
@@ -91,7 +92,7 @@ extern "C"
 
     typedef struct
     {
-        float contrast_threshold;       /* [2.0] */
+        float contrast_threshold;       /* [2/255]: for [0, 1] images; 2.0 for [0, 255] */
         float lowest_scale;             /* [0.0] */
         float highest_scale;            /* [+inf] */
         float edge_threshold;           /* [10.0] */

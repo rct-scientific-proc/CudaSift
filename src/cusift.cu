@@ -455,7 +455,12 @@ void cusift_default_extract_options(cusift_extract_options *o)
 {
     if (!o)
         return;
-    o->contrast_threshold       = 2.0f;
+    // 2 grey levels of an 8-bit image, for input in [0, 1].  The DoG
+    // extremum test is the only part of the pipeline that compares an
+    // intensity against an absolute value; everything else (edge test,
+    // refinement, orientation, descriptor) is a ratio, so callers with
+    // [0, 255] data get identical results by setting this back to 2.0.
+    o->contrast_threshold       = 2.0f / 255.0f;
     o->lowest_scale             = 0.0f;
     o->highest_scale            = std::numeric_limits<float>::infinity();
     o->edge_threshold           = 10.0f;

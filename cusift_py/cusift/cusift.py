@@ -218,9 +218,11 @@ class ExtractOptions:
 
     Field names and defaults are those of ``cusift_extract_options`` and
     ``cusift_default_extract_options()`` in ``cusift.h``, which documents each.
+    ``contrast_threshold`` is in the image's intensity units: the default
+    (2/255) suits images in ``[0, 1]``; use 2.0 for ``[0, 255]`` data.
     """
 
-    contrast_threshold: float = 2.0
+    contrast_threshold: float = 2.0 / 255.0
     lowest_scale: float = 0.0
     highest_scale: float = float("inf")
     edge_threshold: float = 10.0
@@ -337,7 +339,7 @@ def _check_capacity(label: str, capacity: int) -> int:
 
 
 def _load_image_grayscale(path: Union[str, Path]) -> tuple[np.ndarray, int, int]:
-    """Load *path* as a grayscale float32 image.  Returns ``(pixels, w, h)``."""
+    """Load *path* as a grayscale float32 image in ``[0, 1]``.  Returns ``(pixels, w, h)``."""
     try:
         from PIL import Image
     except ImportError as exc:
@@ -347,8 +349,14 @@ def _load_image_grayscale(path: Union[str, Path]) -> tuple[np.ndarray, int, int]
         ) from exc
     img = Image.open(path).convert("L")
     w, h = img.size
-    arr = np.asarray(img, dtype=np.float32)
+    arr = np.asarray(img, dtype=np.float32) / np.float32(255.0)
     return np.ascontiguousarray(arr), w, h
+
+
+def _to_uint8(pixels: np.ndarray) -> np.ndarray:
+    """A ``[0, 1]`` float image as 8-bit grey levels for drawing; NaN becomes 0."""
+    arr = np.nan_to_num(np.asarray(pixels, dtype=np.float32), nan=0.0)
+    return (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
 def _resolve_image_arg(
@@ -566,9 +574,11 @@ class CuSift:
         Parameters
         ----------
         image : str | Path | numpy.ndarray
-            Either a file path (loaded as grayscale via Pillow) or a 2-D
-            ``float32`` numpy array of shape ``(height, width)`` with pixel
-            values in ``[0, 255]``.
+            Either a file path (loaded as grayscale via Pillow and scaled
+            to ``[0, 1]``) or a 2-D ``float32`` numpy array of shape
+            ``(height, width)`` with pixel values in ``[0, 1]``.  For an
+            array in another range, scale ``options.contrast_threshold``
+            by the same factor (2.0 for ``[0, 255]``).
         width, height : int, optional
             Required only when *image* is a 1-D array.  For 2-D arrays
             and file paths these are inferred automatically.
@@ -1266,7 +1276,7 @@ class CuSift:
         Parameters
         ----------
         image : str | Path | numpy.ndarray
-            Source image (file path or 2-D float32 array).
+            Source image (file path, or 2-D float32 array in ``[0, 1]``).
         keypoints : Keypoints
             Keypoints to draw (returned by :meth:`extract`).
         output : str | Path
@@ -1308,8 +1318,7 @@ class CuSift:
             img = Image.open(image).convert("RGB")
         elif isinstance(image, np.ndarray):
             pixels, w, h = _resolve_image_arg(image, width, height, "image")
-            arr = np.nan_to_num(pixels, nan=0.0)
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
+            arr = _to_uint8(pixels)
             if arr.ndim == 1:
                 arr = arr.reshape(h, w)
             img = Image.fromarray(arr, mode="L").convert("RGB")
@@ -1457,7 +1466,7 @@ class CuSift:
         Parameters
         ----------
         image : str | Path | numpy.ndarray
-            Source image (file path or 2-D float32 array).
+            Source image (file path, or 2-D float32 array in ``[0, 1]``).
         keypoints : Keypoints
             Keypoints returned by :meth:`extract`.
         min_sampling : float
@@ -1508,8 +1517,7 @@ class CuSift:
                     src = Image.open(image).convert("RGB")
                 elif isinstance(image, np.ndarray):
                     pixels, w, h = _resolve_image_arg(image, width, height, "image")
-                    arr = np.nan_to_num(pixels, nan=0.0)
-                    arr = np.clip(arr, 0, 255).astype(np.uint8)
+                    arr = _to_uint8(pixels)
                     if arr.ndim == 1:
                         arr = arr.reshape(h, w)
                     src = Image.fromarray(arr, mode="L").convert("RGB")

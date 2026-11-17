@@ -172,7 +172,9 @@ def main(argv: list[str] | None = None) -> None:
     # -- Objective --------------------------------------------------------
     def objective(trial: optuna.Trial) -> float:
         # --- Extraction parameters ---
-        thresh = trial.suggest_float("thresh", 2.0, 10.0)
+        # contrast_threshold in the [0, 1] units of the loaded images
+        # (2 to 10 grey levels of an 8-bit image).
+        thresh = trial.suggest_float("thresh", 2.0 / 255.0, 10.0 / 255.0)
         lowest_scale = trial.suggest_float("lowest_scale", 0.0, 8.0)
         edge_thresh = trial.suggest_float("edge_thresh", 5.0, 20.0)
         init_blur = trial.suggest_float("init_blur", 0.3, 2.0)
@@ -266,25 +268,27 @@ def main(argv: list[str] | None = None) -> None:
     print("=" * 60)
 
     # -- Re-run with best params and save outputs -------------------------
+    # Same construction as the objective, so the re-run reproduces the best
+    # trial (same seed, same refinement rounds, same keypoint capacity).
     bp = best.params
     extract_opts = ExtractOptions(
-        thresh=bp["thresh"],
+        contrast_threshold=bp["thresh"],
         lowest_scale=bp["lowest_scale"],
-        edge_thresh=bp["edge_thresh"],
-        init_blur=bp["init_blur"],
-        max_keypoints=32768,
+        edge_threshold=bp["edge_thresh"],
+        initial_blur=bp["init_blur"],
+        max_keypoints=65536,
         num_octaves=bp["num_octaves"],
     )
     homography_opts = HomographyOptions(
-        num_loops=bp["num_loops"],
+        ransac_iterations=bp["num_loops"],
         min_score=0.0,
         max_ambiguity=bp["max_ambiguity"],
-        thresh=bp["ransac_thresh"],
-        improve_num_loops=5,
-        improve_min_score=0.0,
-        improve_max_ambiguity=bp["improve_max_ambiguity"],
-        improve_thresh=bp["improve_thresh"],
-        seed=0,
+        inlier_threshold=bp["ransac_thresh"],
+        refine_min_score=0.0,
+        refine_max_ambiguity=bp["improve_max_ambiguity"],
+        refine_inlier_threshold=bp["improve_thresh"],
+        seed=args.seed,
+        refine_iterations=bp["improve_num_loops"],
     )
 
     print("\nRe-running best configuration ...")
@@ -311,7 +315,8 @@ def main(argv: list[str] | None = None) -> None:
     from PIL import Image as PILImage
 
     def _save_warped(pixels, path):
-        arr = np.nan_to_num(np.clip(pixels, 1, 255), nan=0.0)
+        # [0, 1] -> 8-bit, keeping covered pixels >= 1 so 0 still marks "no source".
+        arr = np.nan_to_num(np.clip(pixels * 255.0 + 0.5, 1, 255), nan=0.0)
         PILImage.fromarray(arr.astype(np.uint8), mode="L").save(str(path))
 
     _save_warped(warped1, out_dir / "warped_image1.png")

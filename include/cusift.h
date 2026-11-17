@@ -214,7 +214,7 @@ extern "C"
         float x;             /**< Column, in pixels of the original image. */
         float y;             /**< Row, in pixels of the original image. */
         float scale;         /**< Detected scale (sigma). */
-        float sharpness;     /**< Difference-of-Gaussians response at the keypoint. */
+        float sharpness;     /**< Difference-of-Gaussians response at the keypoint, in the input's intensity units. */
         float edgeness;      /**< Edge response (trace^2 / det of the Hessian). */
         float orientation;   /**< Dominant orientation in degrees. */
         float score;         /**< Best match similarity (cosine), set by cusift_match. */
@@ -248,7 +248,13 @@ extern "C"
     } cusift_keypoints;
 
     /**
-     * @brief A grayscale float32 image in HOST memory, row-major, values in [0, 255].
+     * @brief A grayscale float32 image in HOST memory, row-major, values in [0, 1].
+     *
+     * The default options assume intensities in [0, 1] (an 8-bit image divided
+     * by 255, a 16-bit one by 65535). Only cusift_extract_options::
+     * contrast_threshold depends on the intensity scale; for data in another
+     * range, scale it by the same factor (2.0 for [0, 255]) and every result
+     * is the same as for the rescaled image.
      *
      * pixels must point to memory the CPU can read: ordinary pageable memory,
      * pinned memory from cudaHostAlloc / cudaMallocHost, or managed memory from
@@ -309,9 +315,11 @@ extern "C"
      * @brief Options for SIFT extraction. Fill with cusift_default_extract_options()
      *        and change what you need.
      *
-     * contrast_threshold [2.0]: a Difference-of-Gaussians extremum is kept when
-     *   its absolute response exceeds this, in intensity units of the [0, 255]
-     *   input. Higher keeps fewer, more stable keypoints.
+     * contrast_threshold [2/255 = 0.00784]: a Difference-of-Gaussians extremum is
+     *   kept when its absolute response exceeds this, in the intensity units of
+     *   the input, so the default suits [0, 1] images (two grey levels of an
+     *   8-bit image). Use 2.0 for [0, 255] input. Higher keeps fewer, more
+     *   stable keypoints. The only option that depends on the intensity scale.
      * lowest_scale [0.0], highest_scale [+inf]: keep only keypoints whose scale,
      *   in pixels of the original image, lies in this range.
      * edge_threshold [10.0]: candidates whose Hessian trace^2 / determinant

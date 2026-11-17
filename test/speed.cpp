@@ -26,7 +26,7 @@ static int load_image_to_grayscale_float(const char* filename, std::vector<float
     image.resize(width * height);
     for (int i = 0; i < width * height; ++i)
     {
-        image[i] = static_cast<float>(data[i]);
+        image[i] = static_cast<float>(data[i]) / 255.0f; // [0, 1], the range the default contrast_threshold assumes
     }
 
     stbi_image_free(data);
@@ -81,7 +81,7 @@ static bool check_error(const char* label)
 static cusift_extract_options default_extract_options()
 {
     cusift_extract_options opts;
-    opts.contrast_threshold = 2.0f;
+    opts.contrast_threshold = 2.0f / 255.0f;
     opts.lowest_scale = 0.0f;
     opts.highest_scale = std::numeric_limits<float>::infinity();
     opts.edge_threshold = 10.0f;

@@ -99,10 +99,15 @@ d  = kp1.descriptors();        % 128 x N single
 
 Run `cusift_demo` for the full sequence on the bundled images.
 
-Images are passed as they come from `imread` (any numeric class, grayscale,
-values 0–255); the class converts to `single` and handles the row-major
-transpose. Homographies are 3×3 doubles mapping image-1 coordinates to
-image 2, with `H(3,3) = 1`.
+Images are passed as they come from `imread` or `im2double` (grayscale).
+The default options assume intensities in [0, 1]: integer images are scaled
+the way `im2single` does (`uint8` / 255, `uint16` / 65535), while `single`,
+`double` and `logical` images are passed through unscaled and should already
+be in [0, 1]. For float data in another range, scale `contrast_threshold` by
+the same factor, e.g. `sift.extractOptions('contrast_threshold', 2.0)` for
+[0, 255]. The class also handles the row-major transpose. Warped images come
+back as `single` in [0, 1], NaN where no source covers a pixel. Homographies
+are 3×3 doubles mapping image-1 coordinates to image 2, with `H(3,3) = 1`.
 
 Options are plain structs: `sift.extractOptions('max_keypoints', 8192)` and
 `sift.homographyOptions('model', 1, 'attempts', 3, 'goal', 0)`. Field names

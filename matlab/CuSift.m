@@ -1,9 +1,14 @@
 classdef CuSift < handle
     %CUSIFT GPU SIFT extraction, matching, homography estimation and warping.
     %   A thin class over the cusift_matlab shared library (loaded with
-    %   loadlibrary, no MEX).  Images are 2-D grayscale matrices of any numeric
-    %   class with values in [0, 255]; they are converted to single and
-    %   transposed for the library here, so pass them as they come from imread.
+    %   loadlibrary, no MEX).  Images are 2-D grayscale matrices.  Integer
+    %   images are scaled to [0, 1] the way im2single does (uint8 / 255,
+    %   uint16 / 65535), and single, double and logical images are taken to be
+    %   in [0, 1] already, which is the range the default options assume; so
+    %   pass images as they come from imread, or as im2double/im2single give
+    %   them.  For float data in another range, scale contrast_threshold by
+    %   the same factor (2.0 for [0, 255]).  Warped images come back as
+    %   single in [0, 1], NaN where no source covers a pixel.
     %
     %   sift = CuSift();                                 % loads the library, selects the GPU
     %   kp1 = sift.extract(img1);                        % CuSiftKeypoints
@@ -255,11 +260,21 @@ classdef CuSift < handle
         end
 
         function [pix, width, height] = prepare(img)
-            %PREPARE Convert a grayscale image to the row-major single array the library wants.
+            %PREPARE Convert a grayscale image to the row-major [0, 1] single array the library wants.
+            %   Integer classes map their full range onto [0, 1] (as im2single
+            %   does, without needing the Image Processing Toolbox); single,
+            %   double and logical are passed through unscaled.
             validateattributes(img, {'numeric', 'logical'}, {'2d', 'nonempty'}, 'CuSift', 'img');
             height = size(img, 1);
             width = size(img, 2);
-            pix = single(img).';     % column-major W x H is row-major H x W
+            if isinteger(img)
+                lo = double(intmin(class(img)));
+                hi = double(intmax(class(img)));
+                img = single((double(img) - lo) / (hi - lo));
+            else
+                img = single(img);
+            end
+            pix = img.';     % column-major W x H is row-major H x W
         end
 
         function img = takeImage(handle)

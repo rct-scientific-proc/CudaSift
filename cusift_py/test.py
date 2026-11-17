@@ -17,14 +17,16 @@ from cusift import (
 
 
 def _load_grayscale_float32(path: Path) -> np.ndarray:
+    """Grayscale float32 in [0, 1], the range the default options assume."""
     img = Image.open(path).convert("L")
-    arr = np.asarray(img, dtype=np.float32)
+    arr = np.asarray(img, dtype=np.float32) / np.float32(255.0)
     return np.ascontiguousarray(arr)
 
 
 def _save_image(path: Path, arr: np.ndarray) -> None:
+    """Save a [0, 1] float image (NaN where uncovered) as 8-bit PNG."""
     clean = np.nan_to_num(arr, nan=0.0)
-    clean = np.clip(clean, 0, 255).astype(np.uint8)
+    clean = (np.clip(clean, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     Image.fromarray(clean, mode="L").save(path)
 
 
